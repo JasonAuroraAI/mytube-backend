@@ -31,27 +31,28 @@ import {
 } from "./aws/s3Helpers.js";
 
 const app = express();
-const ORIGIN = process.env.CLIENT_ORIGIN || "http://localhost:5173";
 
-const allowed = [
-  "http://localhost:5173",
-  "http://127.0.0.1:5173",
-  "https://mytube-frontend-woad.vercel.app",
-];
+const allowedOrigins = new Set(
+  (process.env.CLIENT_ORIGINS || "http://localhost:5173")
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean)
+);
 
 app.use(
   cors({
     origin: (origin, cb) => {
-      // allow server-to-server / curl requests (no origin)
+      // allow server-to-server / curl / render health checks
       if (!origin) return cb(null, true);
 
-      if (allowedOrigins.includes(origin)) return cb(null, true);
+      if (allowedOrigins.has(origin)) return cb(null, true);
 
       return cb(new Error(`CORS blocked origin: ${origin}`));
     },
     credentials: true,
   })
 );
+
 
 app.use(morgan("dev"));
 app.use(express.json());
