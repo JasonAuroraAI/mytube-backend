@@ -5,6 +5,28 @@ import { pool } from "./db.js";
 
 const router = express.Router();
 
+/**
+ * Cookie config:
+ * - In production (Render/Vercel): cross-site cookie needs SameSite=None + Secure
+ * - In dev (localhost): SameSite=Lax and Secure=false is fine
+ *
+ * Make sure server.js has: app.set("trust proxy", 1)
+ */
+function cookieOptions() {
+  const days = Number(process.env.SESSION_DAYS || 7);
+  const isProd = process.env.NODE_ENV === "production";
+
+  return {
+    httpOnly: true,
+    maxAge: days * 24 * 60 * 60 * 1000,
+    path: "/",
+
+    // cross-site cookie support (Vercel -> Render)
+    sameSite: isProd ? "none" : "lax",
+    secure: isProd, // required for SameSite=None
+  };
+}
+
 /* helpers */
 async function createSession(userId, res) {
   const sessionId = uuid();
@@ -18,11 +40,7 @@ async function createSession(userId, res) {
     [sessionId, userId, days]
   );
 
-  res.cookie("session_id", sessionId, {
-    httpOnly: true,
-    sameSite: "lax",
-    maxAge: days * 24 * 60 * 60 * 1000,
-  });
+  res.cookie("session_id", sessionId, cookieOptions());
 }
 
 /* register */
@@ -48,7 +66,13 @@ router.post("/register", async (req, res) => {
     const user = result.rows[0];
     await createSession(user.id, res);
 
-    res.json(user);
+    res.json({
+      id: user.id,
+      username: user.username,
+      tokens: user.tokens,
+      rating: user.rating,
+      reviewCount: user.review_count,
+    });
   } catch (err) {
     res.status(400).json({ error: "User already exists" });
   }
@@ -58,12 +82,9 @@ router.post("/register", async (req, res) => {
 router.post("/login", async (req, res) => {
   const { email, password } = req.body;
 
-  const result = await pool.query(
-    `SELECT * FROM users WHERE email = $1`,
-    [email]
-  );
-
+  const result = await pool.query(`SELECT * FROM users WHERE email = $1`, [email]);
   const user = result.rows[0];
+
   if (!user) return res.status(401).json({ error: "Invalid credentials" });
 
   const ok = await bcrypt.compare(password, user.password_hash);
@@ -82,17 +103,20 @@ router.post("/login", async (req, res) => {
 
 /* logout */
 router.post("/logout", async (req, res) => {
-  const sid = req.cookies.session_id;
+  const sid = req.cookies?.session_id;
+
   if (sid) {
     await pool.query(`DELETE FROM sessions WHERE id = $1`, [sid]);
   }
-  res.clearCookie("session_id");
+
+  // Must match cookie options to reliably clear it
+  res.clearCookie("session_id", cookieOptions());
   res.json({ ok: true });
 });
 
 /* current user */
 router.get("/me", async (req, res) => {
-  const sid = req.cookies.session_id;
+  const sid = req.cookies?.session_id;
   if (!sid) return res.status(401).json(null);
 
   const result = await pool.query(
@@ -108,7 +132,10 @@ router.get("/me", async (req, res) => {
   if (!result.rows[0]) return res.status(401).json(null);
 
   res.json({
-    ...result.rows[0],
+    id: result.rows[0].id,
+    username: result.rows[0].username,
+    tokens: result.rows[0].tokens,
+    rating: result.rows[0].rating,
     reviewCount: result.rows[0].review_count,
   });
 });
