@@ -1,0 +1,96 @@
+[
+  {
+    "id": "000000001",
+    "title": "video the first",
+    "category": "Genre A",
+    "description": "Ted goes to school with John and immediately decides to get expelled.",
+    "filename": "ted_s01_e01.mp4",
+    "thumb": "ted_s01_e01.jpg",
+    "duration": 0,
+    "channel": "AI Overlord",
+    "views": 12400,
+    "durationText": "22:43",
+    "visibility": "public",
+    "tags": ["ted", "comedy", "sitcom", "episode", "john", "high school"]
+  },
+  {
+    "id": "000000002",
+    "title": "video the second",
+    "category": "Genre A",
+    "description": "Ted and John's plan to exact revenge on the school bully inadvertently puts them in a parental role.",
+    "filename": "ted_s01_e02.mp4",
+    "thumb": "ted_s01_e02.jpg",
+    "duration": 0,
+    "channel": "AI Overlord",
+    "views": 1200,
+    "durationText": "21:22",
+     "visibility": "public",
+    "tags": ["teddy", "bear", "sitcom"]
+
+  },
+
+  {
+    "id": "000000003",
+    "title": "testing second row! ",
+    "category": "Genre B",
+    "description": "Oh wait how do I see descriptions?",
+    "filename": "ted_s01_e03.mp4",
+    "thumb": "ted_s01_e03.jpg",
+    "duration": 0,
+    "channel": "AI Overlord",
+    "views": 13220,
+    "visibility": "public",
+    "tags": ["teddy", "bear", "sitcom"],
+    "durationText": "19:41"
+
+
+  },
+
+  {
+  "id": "000000004",
+  "title": "kamp krusty  ",
+  "category": "Genre C",
+  "description": "I figured it out",
+  "filename": "The Simpsons S04E01 Kamp Krusty.mp4",
+  "thumb": "The Simpsons S04E01 Kamp Krusty.jpg",
+  "duration": 0,
+  "channel": "Not A Fox",
+  "views": 13220,
+  "durationText": "19:41",
+  "visibility": "public",
+  "tags": ["krusty", "camp", "simpsons", "kamp", "batman"]
+  },
+
+  {
+  "id": "000000005",
+  "title": "whacking day",
+  "category": "Genre C",
+  "description": "Something about a national holiday where they whack snakes",
+  "filename": "The Simpsons S04E20 Whacking Day.mp4",
+  "thumb": "The Simpsons S04E20 Whacking Day.jpg",
+  "duration": 0,
+  "channel": "Not A Fox",
+  "views": 13220,
+  "durationText": "19:41",
+  "visibility": "public",
+  "tags": ["black", "man", "simpsons"]
+  },
+
+  {
+  "id": "000000006",
+  "title": "Ralph loves Lisa",
+  "category": "Genre C",
+  "description": "You remember this one, it's where Ralph loves Lisa",
+  "filename": "The Simpsons S04E15 I Love Lisa.mp4",
+  "thumb": "The Simpsons S04E15 I Love Lisa.jpg",
+  "duration": 0,
+  "channel": "Not A Fox",
+  "views": 13220,
+  "durationText": "19:41",
+  "visibility": "public",
+  "tags": ["valentines", "simpsons"]
+   
+  }
+
+
+]
