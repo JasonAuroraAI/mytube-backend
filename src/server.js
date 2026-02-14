@@ -4,8 +4,8 @@ import morgan from "morgan";
 import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
-import "dotenv/config";
 import cookieParser from "cookie-parser";
+import "dotenv/config";
 
 import authRouter from "./auth.js";
 import profileRouter from "./profile.js";
@@ -24,16 +24,26 @@ import {
   deleteFromS3,
 } from "./aws/s3Helpers.js";
 
-console.log("Using DB:", process.env.DATABASE_URL);
-
 const app = express();
 
-// =====================================================
-// CORS (single source of truth)
-// - CLIENT_ORIGINS = comma-separated list of allowed origins
-//   e.g. "http://localhost:5173,https://mytube-frontend-woad.vercel.app"
-// - ALLOW_VERCEL_PREVIEWS=true will allow *.vercel.app previews
-// =====================================================
+/**
+ * IMPORTANT for Render / proxies:
+ * - allows secure cookies to work correctly behind Render’s proxy
+ */
+app.set("trust proxy", 1);
+
+console.log("Using DB:", process.env.DATABASE_URL);
+
+// -------------------------
+// CORS
+// -------------------------
+/**
+ * Put your allowed frontend origins in CLIENT_ORIGINS as comma-separated:
+ * e.g.
+ * CLIENT_ORIGINS=http://localhost:5173,https://mytube-frontend-xxx.vercel.app
+ *
+ * Tip: Vercel preview URLs change. Add them as needed, or use a stable Production domain.
+ */
 const allowedOrigins = new Set(
   (process.env.CLIENT_ORIGINS || "http://localhost:5173")
     .split(",")
@@ -41,38 +51,26 @@ const allowedOrigins = new Set(
     .filter(Boolean)
 );
 
-const allowVercelPreviews =
-  String(process.env.ALLOW_VERCEL_PREVIEWS || "true").toLowerCase() === "true";
-
-function isAllowedOrigin(origin) {
-  if (!origin) return true; // render health checks / curl / server-to-server
-
-  if (allowedOrigins.has(origin)) return true;
-
-  // optionally allow Vercel preview deployments
-  if (allowVercelPreviews) {
-    try {
-      const u = new URL(origin);
-      if (u.hostname.endsWith(".vercel.app")) return true;
-    } catch {}
-  }
-
-  return false;
-}
-
 app.use(
   cors({
     origin: (origin, cb) => {
-      if (isAllowedOrigin(origin)) return cb(null, true);
+      // allow server-to-server / curl / health checks
+      if (!origin) return cb(null, true);
+
+      if (allowedOrigins.has(origin)) return cb(null, true);
+
       return cb(new Error(`CORS blocked origin: ${origin}`));
     },
     credentials: true,
   })
 );
 
-// Preflight for all routes
+// Ensure OPTIONS preflight works everywhere
 app.options("*", cors());
 
+// -------------------------
+// Middleware
+// -------------------------
 app.use(morgan("dev"));
 app.use(express.json());
 app.use(cookieParser());
@@ -142,10 +140,16 @@ async function requireAuth(req, res, next) {
 }
 
 // -------------------------
-// routers
+// Routers
 // -------------------------
+/**
+ * Support BOTH paths so your frontend can hit either:
+ * - /auth/login
+ * - /api/auth/login
+ *
+ * Your console earlier showed /auth/me + /auth/login, so this avoids 404s.
+ */
 app.use("/auth", authRouter);
-// Optional compatibility if client calls /api/auth/*
 app.use("/api/auth", authRouter);
 
 app.use("/api/profile", profileRouter);
@@ -277,7 +281,6 @@ async function generateHlsVOD(inputPath, outDir) {
     "error",
     "-i",
     inputPath,
-
     "-c:v",
     "libx264",
     "-preset",
@@ -290,7 +293,6 @@ async function generateHlsVOD(inputPath, outDir) {
     "128k",
     "-ac",
     "2",
-
     "-f",
     "hls",
     "-hls_time",
@@ -303,7 +305,6 @@ async function generateHlsVOD(inputPath, outDir) {
     "mpegts",
     "-hls_segment_filename",
     path.join(outDir, "seg_%03d.ts"),
-
     path.join(outDir, "master.m3u8"),
   ];
 
@@ -404,7 +405,6 @@ function baseUrl(req) {
   return `${req.protocol}://${req.get("host")}`;
 }
 
-// declare playbackUrl properly
 async function toApiVideo(req, v) {
   const b = baseUrl(req);
   const { ratingAvg, ratingCount } = await getRatingStats(v.id);
@@ -453,9 +453,9 @@ async function toApiVideo(req, v) {
   };
 }
 
-// =====================================================
-// COMMENTS API (top-level + one-level replies)  ✅ single route
-// =====================================================
+// -------------------------
+// COMMENTS API (top-level + one-level replies)
+// -------------------------
 app.get("/api/videos/:videoId/comments", async (req, res) => {
   try {
     const videoId = req.params.videoId;
@@ -475,12 +475,9 @@ app.get("/api/videos/:videoId/comments", async (req, res) => {
         c.body,
         c.created_at,
         c.updated_at,
-
         u.username,
         COALESCE(p.display_name, '') AS display_name,
-
         COALESCE(cls.like_count, 0) AS like_count,
-
         CASE
           WHEN $3::bigint IS NULL THEN false
           ELSE EXISTS (
@@ -529,12 +526,9 @@ app.get("/api/videos/:videoId/comments", async (req, res) => {
           c.body,
           c.created_at,
           c.updated_at,
-
           u.username,
           COALESCE(p.display_name, '') AS display_name,
-
           COALESCE(cls.like_count, 0) AS like_count,
-
           CASE
             WHEN $3::bigint IS NULL THEN false
             ELSE EXISTS (
@@ -585,242 +579,8 @@ app.get("/api/videos/:videoId/comments", async (req, res) => {
   }
 });
 
-app.post("/api/videos/:videoId/comments", requireAuth, async (req, res) => {
-  try {
-    const videoId = req.params.videoId;
-    const userId = req.user.id;
-
-    const body = String(req.body?.body || "").trim();
-    const parentCommentId = req.body?.parentCommentId ?? null;
-
-    if (!body) return res.status(400).json({ error: "Comment body required" });
-    if (body.length > 2000) return res.status(400).json({ error: "Comment too long" });
-
-    // validate parent if provided (must be top-level comment on same video)
-    let parentId = null;
-    if (parentCommentId !== null && parentCommentId !== undefined && parentCommentId !== "") {
-      const pid = Number(parentCommentId);
-      if (!Number.isFinite(pid)) return res.status(400).json({ error: "Bad parentCommentId" });
-
-      const parent = await pool.query(
-        `
-        SELECT id
-        FROM video_comments
-        WHERE id = $1
-          AND video_id = $2
-          AND parent_comment_id IS NULL
-        `,
-        [pid, videoId]
-      );
-
-      if (!parent.rows.length) {
-        return res.status(400).json({ error: "Parent comment not found (or not top-level)" });
-      }
-
-      parentId = pid;
-    }
-
-    const result = await pool.query(
-      `
-      INSERT INTO video_comments (video_id, user_id, body, parent_comment_id)
-      VALUES ($1, $2, $3, $4)
-      RETURNING id, video_id, user_id, body, parent_comment_id, created_at, updated_at
-      `,
-      [videoId, userId, body, parentId]
-    );
-
-    const profile = await pool.query(
-      `SELECT COALESCE(display_name,'') AS display_name FROM user_profiles WHERE user_id = $1`,
-      [userId]
-    );
-    const displayName = profile.rows[0]?.display_name || req.user.username;
-
-    res.json({
-      ok: true,
-      comment: {
-        id: Number(result.rows[0].id),
-        videoId: result.rows[0].video_id,
-        userId: Number(result.rows[0].user_id),
-        username: req.user.username,
-        displayName,
-        body: result.rows[0].body,
-        parentCommentId: result.rows[0].parent_comment_id
-          ? Number(result.rows[0].parent_comment_id)
-          : null,
-        createdAt: result.rows[0].created_at,
-        updatedAt: result.rows[0].updated_at,
-        likeCount: 0,
-        likedByMe: false,
-        replies: [],
-      },
-    });
-  } catch (e) {
-    console.error("POST /api/videos/:videoId/comments error:", e);
-    res.status(500).json({ error: "Failed to post comment" });
-  }
-});
-
-// EDIT / DELETE comments
-app.patch("/api/comments/:commentId", requireAuth, async (req, res) => {
-  const commentId = Number(req.params.commentId);
-  const userId = req.user.id;
-
-  if (!Number.isFinite(commentId)) return res.status(400).json({ error: "Bad comment id" });
-
-  const body = String(req.body?.body || "").trim();
-  if (!body) return res.status(400).json({ error: "Comment body required" });
-  if (body.length > 2000) return res.status(400).json({ error: "Comment too long" });
-
-  try {
-    const result = await pool.query(
-      `
-      UPDATE video_comments
-      SET body = $3, updated_at = now()
-      WHERE id = $1 AND user_id = $2
-      RETURNING id, video_id, user_id, body, parent_comment_id, created_at, updated_at
-      `,
-      [commentId, userId, body]
-    );
-
-    if (!result.rows.length) {
-      return res.status(403).json({ error: "Not allowed (or comment not found)" });
-    }
-
-    const row = result.rows[0];
-    res.json({
-      ok: true,
-      comment: {
-        id: Number(row.id),
-        videoId: row.video_id,
-        userId: Number(row.user_id),
-        body: row.body,
-        parentCommentId: row.parent_comment_id ? Number(row.parent_comment_id) : null,
-        createdAt: row.created_at,
-        updatedAt: row.updated_at,
-      },
-    });
-  } catch (e) {
-    console.error("PATCH /api/comments/:commentId error:", e);
-    res.status(500).json({ error: "Failed to edit comment" });
-  }
-});
-
-app.delete("/api/comments/:commentId", requireAuth, async (req, res) => {
-  const commentId = Number(req.params.commentId);
-  const userId = req.user.id;
-
-  if (!Number.isFinite(commentId)) return res.status(400).json({ error: "Bad comment id" });
-
-  try {
-    const result = await pool.query(
-      `
-      DELETE FROM video_comments
-      WHERE id = $1 AND user_id = $2
-      RETURNING id
-      `,
-      [commentId, userId]
-    );
-
-    if (!result.rows.length) {
-      return res.status(403).json({ error: "Not allowed (or comment not found)" });
-    }
-
-    res.json({ ok: true, deletedId: commentId });
-  } catch (e) {
-    console.error("DELETE /api/comments/:commentId error:", e);
-    res.status(500).json({ error: "Failed to delete comment" });
-  }
-});
-
-// likes (toggle style)
-app.post("/api/comments/:commentId/toggle-like", requireAuth, async (req, res) => {
-  const commentId = Number(req.params.commentId);
-  const userId = req.user.id;
-
-  if (!Number.isFinite(commentId)) return res.status(400).json({ error: "Bad comment id" });
-
-  try {
-    const existing = await pool.query(
-      `SELECT 1 FROM comment_likes WHERE comment_id = $1 AND user_id = $2`,
-      [commentId, userId]
-    );
-
-    if (existing.rows.length) {
-      await pool.query(
-        `DELETE FROM comment_likes WHERE comment_id = $1 AND user_id = $2`,
-        [commentId, userId]
-      );
-    } else {
-      await pool.query(
-        `INSERT INTO comment_likes (comment_id, user_id) VALUES ($1, $2)`,
-        [commentId, userId]
-      );
-    }
-
-    const stats = await pool.query(
-      `SELECT COUNT(*)::int AS like_count FROM comment_likes WHERE comment_id = $1`,
-      [commentId]
-    );
-
-    res.json({
-      ok: true,
-      commentId,
-      liked: !existing.rows.length,
-      likeCount: stats.rows[0].like_count,
-    });
-  } catch (e) {
-    console.error("POST /api/comments/:commentId/toggle-like error:", e);
-    res.status(500).json({ error: "Failed to toggle like" });
-  }
-});
-
-// =========================
-// VIEWS (once per account per video)
-// =========================
-app.post("/api/videos/:id/view", requireAuth, async (req, res) => {
-  const videoId = String(req.params.id);
-  const userId = Number(req.user.id);
-
-  try {
-    const result = await pool.query(
-      `
-      WITH ins AS (
-        INSERT INTO video_views (video_id, user_id)
-        VALUES ($1::text, $2::bigint)
-        ON CONFLICT (video_id, user_id) DO NOTHING
-        RETURNING 1
-      ),
-      upd AS (
-        UPDATE videos
-        SET views = views + (SELECT COUNT(*) FROM ins)
-        WHERE id = $1::text
-        RETURNING views
-      )
-      SELECT
-        (SELECT views FROM upd) AS views,
-        (SELECT COUNT(*) FROM ins)::int AS added;
-      `,
-      [videoId, userId]
-    );
-
-    if (!result.rows.length || result.rows[0].views == null) {
-      return res.status(404).json({ error: "Video not found" });
-    }
-
-    res.json({
-      ok: true,
-      videoId,
-      views: Number(result.rows[0].views),
-      added: Number(result.rows[0].added || 0),
-    });
-  } catch (e) {
-    console.error("POST /api/videos/:id/view error:", e);
-    res.status(500).json({ error: "Failed to record view" });
-  }
-});
-
 // -------------------------
-// RATINGS API
+// Ratings API
 // -------------------------
 app.get("/api/videos/:id/my-rating", requireAuth, async (req, res) => {
   const videoId = String(req.params.id);
@@ -861,102 +621,22 @@ app.post("/api/videos/:id/rate", requireAuth, async (req, res) => {
 
     const agg = await pool.query(
       `SELECT AVG(rating)::float AS avg, COUNT(*)::int AS count
-       FROM video_ratings
-       WHERE video_id = $1`,
+       FROM video_ratings WHERE video_id = $1`,
       [videoId]
     );
 
-    const ratingAvg = agg.rows[0]?.avg ?? 0;
-    const ratingCount = agg.rows[0]?.count ?? 0;
-
-    await pool
-      .query(`UPDATE videos SET rating_avg = $2, rating_count = $3 WHERE id = $1`, [
-        videoId,
-        ratingAvg,
-        ratingCount,
-      ])
-      .catch(() => {});
-
-    res.json({ ratingAvg, ratingCount });
+    res.json({
+      ratingAvg: agg.rows[0]?.avg ?? 0,
+      ratingCount: agg.rows[0]?.count ?? 0,
+    });
   } catch (err) {
     console.error("rate error:", err);
     res.status(500).json({ error: "Failed to rate video" });
   }
 });
 
-// =====================
-// PROFILE UPLOADS (sorted)
-// =====================
-app.get("/api/profile/u/:username/videos", async (req, res) => {
-  const username = String(req.params.username || "").trim();
-  if (!username) return res.status(400).json({ error: "Missing username" });
-
-  const includePrivate =
-    req.user && req.user.username?.toLowerCase() === username.toLowerCase();
-
-  const sort = String(req.query.sort || "newest").toLowerCase();
-
-  const ORDER_BY = {
-    newest: "v.created_at DESC",
-    oldest: "v.created_at ASC",
-    views: "v.views DESC, v.created_at DESC",
-    rating:
-      "COALESCE(vrs.rating_avg, 0) DESC, COALESCE(vrs.rating_count, 0) DESC, v.created_at DESC",
-  };
-
-  const orderBy = ORDER_BY[sort] || ORDER_BY.newest;
-
-  try {
-    const result = await pool.query(
-      `
-      SELECT
-        v.id,
-        v.user_id,
-        v.title,
-        v.description,
-        v.category,
-        v.visibility,
-        v.filename,
-        v.thumb,
-        v.duration,
-        v.duration_text,
-        v.views,
-        v.tags,
-        v.created_at,
-
-        u.username AS channel_username,
-        COALESCE(p.display_name, u.username) AS channel_display_name,
-
-        COALESCE(vrs.rating_avg, 0) AS rating_avg,
-        COALESCE(vrs.rating_count, 0) AS rating_count
-
-      FROM videos v
-      JOIN users u ON u.id = v.user_id
-      LEFT JOIN user_profiles p ON p.user_id = u.id
-      LEFT JOIN video_rating_stats vrs ON vrs.video_id = v.id
-
-      WHERE lower(u.username) = lower($1)
-        AND (
-          v.visibility = 'public'
-          OR $2::boolean = true
-        )
-
-      ORDER BY ${orderBy}
-      LIMIT 200
-      `,
-      [username, includePrivate]
-    );
-
-    const enriched = await Promise.all(result.rows.map((v) => toApiVideo(req, v)));
-    return res.json(enriched);
-  } catch (e) {
-    console.error("Profile videos error:", e);
-    return res.status(500).json({ error: "Failed to load uploads" });
-  }
-});
-
 // -------------------------
-// VIDEOS API
+// Videos API
 // -------------------------
 app.get("/api/videos", async (req, res) => {
   try {
@@ -998,7 +678,7 @@ app.get("/api/categories", async (_req, res) => {
 });
 
 // -------------------------
-// UPLOAD VIDEO
+// Upload video
 // -------------------------
 app.post("/api/videos/upload", requireAuth, upload.single("video"), async (req, res) => {
   try {
@@ -1070,10 +750,7 @@ app.post("/api/videos/upload", requireAuth, upload.single("video"), async (req, 
             contentType: "image/jpeg",
           });
         } catch (e) {
-          console.warn(
-            "Thumb upload to S3 failed (will fall back to local thumb route):",
-            e.message
-          );
+          console.warn("Thumb upload to S3 failed:", e.message);
         }
       }
 
@@ -1109,12 +786,12 @@ app.post("/api/videos/upload", requireAuth, upload.single("video"), async (req, 
 });
 
 // -------------------------
-// Static thumbs
+// Static thumbs (local placeholder + local mode thumbs)
 // -------------------------
 app.use("/thumbs", express.static(THUMB_DIR));
 
 // -------------------------
-// LOCAL streaming endpoint (only when VIDEO_SOURCE=local)
+// Local streaming endpoint (only used when VIDEO_SOURCE=local)
 // -------------------------
 app.get("/videos/:id/stream", async (req, res) => {
   if (VIDEO_SOURCE !== "local") {
@@ -1136,7 +813,10 @@ app.get("/videos/:id/stream", async (req, res) => {
   const contentType = ext === ".mp4" ? "video/mp4" : "application/octet-stream";
 
   if (!range) {
-    res.writeHead(200, { "Content-Length": fileSize, "Content-Type": contentType });
+    res.writeHead(200, {
+      "Content-Length": fileSize,
+      "Content-Type": contentType,
+    });
     fs.createReadStream(filePath).pipe(res);
     return;
   }
@@ -1162,70 +842,8 @@ app.get("/videos/:id/stream", async (req, res) => {
 });
 
 // -------------------------
-// DELETE VIDEO (local + aws)
-// -------------------------
-app.delete("/api/videos/:id", requireAuth, async (req, res) => {
-  const videoId = String(req.params.id);
-  const userId = req.user.id;
-
-  try {
-    const v = await fetchVideoById(videoId);
-    if (!v) return res.status(404).json({ error: "Not found" });
-
-    if (Number(v.user_id) !== Number(userId)) {
-      return res.status(403).json({ error: "Not allowed" });
-    }
-
-    const storedFilename = v.filename;
-    const storedThumb = v.thumb;
-
-    await pool.query(`DELETE FROM videos WHERE id::text = $1::text`, [videoId]);
-
-    if (VIDEO_SOURCE === "local") {
-      const videoPath = path.join(VIDEO_DIR, storedFilename);
-      try {
-        if (storedFilename && fs.existsSync(videoPath)) fs.unlinkSync(videoPath);
-      } catch {}
-
-      if (storedThumb && storedThumb !== "placeholder.jpg") {
-        const thumbPath = path.join(THUMB_DIR, storedThumb);
-        try {
-          if (fs.existsSync(thumbPath)) fs.unlinkSync(thumbPath);
-        } catch {}
-      }
-    } else if (VIDEO_SOURCE === "aws") {
-      if (storedFilename && storedFilename.includes("/master.m3u8")) {
-        const prefix = storedFilename.replace(/\/master\.m3u8$/i, "");
-        try {
-          await deletePrefixFromS3({ bucket: process.env.S3_UPLOADS_BUCKET, prefix });
-        } catch (e) {
-          console.warn("S3 delete HLS prefix failed (ignored):", e?.message || e);
-        }
-      } else if (storedFilename) {
-        try {
-          await deleteFromS3({ bucket: process.env.S3_UPLOADS_BUCKET, key: storedFilename });
-        } catch (e) {
-          console.warn("S3 delete video failed (ignored):", e?.message || e);
-        }
-      }
-
-      if (storedThumb && storedThumb !== "placeholder.jpg") {
-        try {
-          await deleteFromS3({ bucket: process.env.S3_ASSETS_BUCKET, key: storedThumb });
-        } catch (e) {
-          console.warn("S3 delete thumb failed (ignored):", e?.message || e);
-        }
-      }
-    }
-
-    return res.json({ ok: true, deletedId: videoId });
-  } catch (e) {
-    console.error("DELETE /api/videos/:id error:", e);
-    return res.status(500).json({ error: "Failed to delete video" });
-  }
-});
-
 // Debug
+// -------------------------
 app.get("/__whoami", (req, res) => {
   res.json({ ok: true, user: req.user ?? null, time: new Date().toISOString() });
 });
