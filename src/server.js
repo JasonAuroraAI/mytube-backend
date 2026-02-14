@@ -15,6 +15,12 @@ import multer from "multer";
 import crypto from "crypto";
 import { spawn } from "child_process";
 import os from "os";
+import dotenv from "dotenv";
+dotenv.config();
+
+console.log("Using DB:", process.env.DATABASE_URL);
+
+
 
 // ✅ S3 helpers (single import, consistent exports)
 import {
@@ -27,12 +33,19 @@ import {
 const app = express();
 const ORIGIN = process.env.CLIENT_ORIGIN || "http://localhost:5173";
 
-app.use(
-  cors({
-    origin: ORIGIN,
-    credentials: true,
-  })
-);
+const allowed = [
+  "http://localhost:5173",
+  "http://127.0.0.1:5173",
+];
+
+app.use(cors({
+  origin: (origin, cb) => {
+    if (!origin) return cb(null, true); // curl/postman
+    if (allowed.includes(origin) || origin.endsWith(".vercel.app")) return cb(null, true);
+    return cb(new Error("Not allowed by CORS"));
+  },
+  credentials: true,
+}));
 
 app.use(morgan("dev"));
 app.use(express.json());
@@ -1359,7 +1372,6 @@ app.get("/", (_req, res) => {
   res.send("MYTUBE server ✅ Try /api/videos");
 });
 
-const PORT = process.env.PORT ? Number(process.env.PORT) : 3001;
-app.listen(PORT, () => {
-  console.log(`Server running on http://localhost:${PORT} (VIDEO_SOURCE=${VIDEO_SOURCE})`);
-});
+const PORT = process.env.PORT || 3001;
+app.listen(PORT, () => console.log(`Server running on :${PORT}`));
+
