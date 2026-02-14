@@ -36,16 +36,22 @@ const ORIGIN = process.env.CLIENT_ORIGIN || "http://localhost:5173";
 const allowed = [
   "http://localhost:5173",
   "http://127.0.0.1:5173",
+  "https://mytube-frontend-woad.vercel.app",
 ];
 
-app.use(cors({
-  origin: (origin, cb) => {
-    if (!origin) return cb(null, true); // curl/postman
-    if (allowed.includes(origin) || origin.endsWith(".vercel.app")) return cb(null, true);
-    return cb(new Error("Not allowed by CORS"));
-  },
-  credentials: true,
-}));
+app.use(
+  cors({
+    origin: (origin, cb) => {
+      // allow server-to-server / curl requests (no origin)
+      if (!origin) return cb(null, true);
+
+      if (allowedOrigins.includes(origin)) return cb(null, true);
+
+      return cb(new Error(`CORS blocked origin: ${origin}`));
+    },
+    credentials: true,
+  })
+);
 
 app.use(morgan("dev"));
 app.use(express.json());
