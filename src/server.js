@@ -15,12 +15,6 @@ import multer from "multer";
 import crypto from "crypto";
 import { spawn } from "child_process";
 import os from "os";
-import dotenv from "dotenv";
-dotenv.config();
-
-console.log("Using DB:", process.env.DATABASE_URL);
-
-
 
 // ✅ S3 helpers (single import, consistent exports)
 import {
@@ -30,8 +24,16 @@ import {
   deleteFromS3,
 } from "./aws/s3Helpers.js";
 
+console.log("Using DB:", process.env.DATABASE_URL);
+
 const app = express();
 
+// =====================================================
+// CORS (single source of truth)
+// - CLIENT_ORIGINS = comma-separated list of allowed origins
+//   e.g. "http://localhost:5173,https://mytube-frontend-woad.vercel.app"
+// - ALLOW_VERCEL_PREVIEWS=true will allow *.vercel.app previews
+// =====================================================
 const allowedOrigins = new Set(
   (process.env.CLIENT_ORIGINS || "http://localhost:5173")
     .split(",")
@@ -39,20 +41,37 @@ const allowedOrigins = new Set(
     .filter(Boolean)
 );
 
+const allowVercelPreviews =
+  String(process.env.ALLOW_VERCEL_PREVIEWS || "true").toLowerCase() === "true";
+
+function isAllowedOrigin(origin) {
+  if (!origin) return true; // render health checks / curl / server-to-server
+
+  if (allowedOrigins.has(origin)) return true;
+
+  // optionally allow Vercel preview deployments
+  if (allowVercelPreviews) {
+    try {
+      const u = new URL(origin);
+      if (u.hostname.endsWith(".vercel.app")) return true;
+    } catch {}
+  }
+
+  return false;
+}
+
 app.use(
   cors({
     origin: (origin, cb) => {
-      // allow server-to-server / curl / render health checks
-      if (!origin) return cb(null, true);
-
-      if (allowedOrigins.has(origin)) return cb(null, true);
-
+      if (isAllowedOrigin(origin)) return cb(null, true);
       return cb(new Error(`CORS blocked origin: ${origin}`));
     },
     credentials: true,
   })
 );
 
+// Preflight for all routes
+app.options("*", cors());
 
 app.use(morgan("dev"));
 app.use(express.json());
@@ -122,14 +141,13 @@ async function requireAuth(req, res, next) {
   next();
 }
 
-app.use(cors({
-  origin: "http://localhost:5173",
-  credentials: true
-}));
-
-
+// -------------------------
 // routers
+// -------------------------
 app.use("/auth", authRouter);
+// Optional compatibility if client calls /api/auth/*
+app.use("/api/auth", authRouter);
+
 app.use("/api/profile", profileRouter);
 
 // -------------------------
@@ -386,7 +404,7 @@ function baseUrl(req) {
   return `${req.protocol}://${req.get("host")}`;
 }
 
-// ✅ FIXED: declare playbackUrl properly
+// declare playbackUrl properly
 async function toApiVideo(req, v) {
   const b = baseUrl(req);
   const { ratingAvg, ratingCount } = await getRatingStats(v.id);
@@ -394,7 +412,6 @@ async function toApiVideo(req, v) {
   let playbackUrl = `${b}/videos/${v.id}/stream`;
 
   if (VIDEO_SOURCE === "aws") {
-    // v.filename is expected to be the S3 key (e.g. hls/user/token/master.m3u8)
     if (CDN_UPLOADS_BASE_URL) {
       playbackUrl = `${CDN_UPLOADS_BASE_URL}/${v.filename}`;
     } else if (process.env.S3_UPLOADS_BUCKET && process.env.AWS_REGION) {
@@ -436,140 +453,9 @@ async function toApiVideo(req, v) {
   };
 }
 
-// -------------------------
-// COMMENTS API (list)
-// -------------------------
-app.get("/api/videos/:videoId/comments", async (req, res) => {
-  const videoId = req.params.videoId;
-
-  const limit = Math.min(Number(req.query.limit || 50), 200);
-  const offset = Math.max(Number(req.query.offset || 0), 0);
-
-  const myUserId = req.user?.id ?? null;
-
-  try {
-    const top = await pool.query(
-      `
-      SELECT
-        c.id,
-        c.video_id,
-        c.user_id,
-        c.body,
-        c.created_at,
-        c.updated_at,
-
-        u.username,
-        COALESCE(p.display_name, '') AS display_name,
-
-        COALESCE(cls.like_count, 0) AS like_count,
-
-        CASE
-          WHEN $3::bigint IS NULL THEN false
-          ELSE EXISTS (
-            SELECT 1
-            FROM comment_likes cl
-            WHERE cl.comment_id = c.id
-              AND cl.user_id = $3::bigint
-          )
-        END AS liked_by_me
-      FROM video_comments c
-      JOIN users u ON u.id = c.user_id
-      LEFT JOIN user_profiles p ON p.user_id = u.id
-      LEFT JOIN comment_like_stats cls ON cls.comment_id = c.id
-      WHERE c.video_id = $1
-        AND c.parent_comment_id IS NULL
-      ORDER BY c.created_at DESC
-      LIMIT $2 OFFSET $4
-      `,
-      [videoId, limit, myUserId, offset]
-    );
-
-    const topItems = top.rows.map((r) => ({
-      id: Number(r.id),
-      videoId: r.video_id,
-      userId: Number(r.user_id),
-      username: r.username,
-      displayName: r.display_name || r.username,
-      body: r.body,
-      createdAt: r.created_at,
-      updatedAt: r.updated_at,
-      likeCount: Number(r.like_count),
-      likedByMe: !!r.liked_by_me,
-      replies: [],
-    }));
-
-    const parentIds = topItems.map((c) => c.id);
-
-    if (parentIds.length) {
-      const replies = await pool.query(
-        `
-        SELECT
-          c.id,
-          c.video_id,
-          c.user_id,
-          c.parent_comment_id,
-          c.body,
-          c.created_at,
-          c.updated_at,
-
-          u.username,
-          COALESCE(p.display_name, '') AS display_name,
-
-          COALESCE(cls.like_count, 0) AS like_count,
-
-          CASE
-            WHEN $3::bigint IS NULL THEN false
-            ELSE EXISTS (
-              SELECT 1
-              FROM comment_likes cl
-              WHERE cl.comment_id = c.id
-                AND cl.user_id = $3::bigint
-            )
-          END AS liked_by_me
-        FROM video_comments c
-        JOIN users u ON u.id = c.user_id
-        LEFT JOIN user_profiles p ON p.user_id = u.id
-        LEFT JOIN comment_like_stats cls ON cls.comment_id = c.id
-        WHERE c.video_id = $1
-          AND c.parent_comment_id = ANY($2::bigint[])
-        ORDER BY c.created_at ASC
-        `,
-        [videoId, parentIds, myUserId]
-      );
-
-      const byParent = new Map();
-      for (const r of replies.rows) {
-        const parentId = Number(r.parent_comment_id);
-        if (!byParent.has(parentId)) byParent.set(parentId, []);
-        byParent.get(parentId).push({
-          id: Number(r.id),
-          videoId: r.video_id,
-          userId: Number(r.user_id),
-          username: r.username,
-          displayName: r.display_name || r.username,
-          body: r.body,
-          createdAt: r.created_at,
-          updatedAt: r.updated_at,
-          likeCount: Number(r.like_count),
-          likedByMe: !!r.liked_by_me,
-        });
-      }
-
-      for (const c of topItems) {
-        c.replies = byParent.get(c.id) || [];
-      }
-    }
-
-    return res.json({ videoId, items: topItems, limit, offset });
-  } catch (e) {
-    console.error("GET /api/videos/:videoId/comments error:", e);
-    return res.status(500).json({ error: "Failed to load comments" });
-  }
-});
-
-// =========================
-// COMMENTS API (top-level + one-level replies)
-// =========================
+// =====================================================
+// COMMENTS API (top-level + one-level replies)  ✅ single route
+// =====================================================
 app.get("/api/videos/:videoId/comments", async (req, res) => {
   try {
     const videoId = req.params.videoId;
@@ -933,24 +819,16 @@ app.post("/api/videos/:id/view", requireAuth, async (req, res) => {
   }
 });
 
-// =========================
-// RATINGS: my-rating endpoint (you said we can fix ratings later,
-// but this removes the 404 noise in the console)
-// =========================
 // -------------------------
 // RATINGS API
 // -------------------------
-
-// Get my rating for a video
 app.get("/api/videos/:id/my-rating", requireAuth, async (req, res) => {
   const videoId = String(req.params.id);
   const userId = String(req.user.id);
 
   try {
     const { rows } = await pool.query(
-      `SELECT rating
-       FROM video_ratings
-       WHERE video_id = $1 AND user_id = $2`,
+      `SELECT rating FROM video_ratings WHERE video_id = $1 AND user_id = $2`,
       [videoId, userId]
     );
 
@@ -961,9 +839,6 @@ app.get("/api/videos/:id/my-rating", requireAuth, async (req, res) => {
   }
 });
 
-
-
-// Rate a video (1..5)
 app.post("/api/videos/:id/rate", requireAuth, async (req, res) => {
   const videoId = String(req.params.id);
   const userId = String(req.user.id);
@@ -984,7 +859,6 @@ app.post("/api/videos/:id/rate", requireAuth, async (req, res) => {
       [videoId, userId, rating]
     );
 
-    // recompute avg + count
     const agg = await pool.query(
       `SELECT AVG(rating)::float AS avg, COUNT(*)::int AS count
        FROM video_ratings
@@ -995,11 +869,13 @@ app.post("/api/videos/:id/rate", requireAuth, async (req, res) => {
     const ratingAvg = agg.rows[0]?.avg ?? 0;
     const ratingCount = agg.rows[0]?.count ?? 0;
 
-    // (optional) store on videos table if you keep denormalized fields
-    await pool.query(
-      `UPDATE videos SET rating_avg = $2, rating_count = $3 WHERE id = $1`,
-      [videoId, ratingAvg, ratingCount]
-    ).catch(() => {});
+    await pool
+      .query(`UPDATE videos SET rating_avg = $2, rating_count = $3 WHERE id = $1`, [
+        videoId,
+        ratingAvg,
+        ratingCount,
+      ])
+      .catch(() => {});
 
     res.json({ ratingAvg, ratingCount });
   } catch (err) {
@@ -1007,11 +883,6 @@ app.post("/api/videos/:id/rate", requireAuth, async (req, res) => {
     res.status(500).json({ error: "Failed to rate video" });
   }
 });
-
-
-
-
-
 
 // =====================
 // PROFILE UPLOADS (sorted)
@@ -1076,7 +947,6 @@ app.get("/api/profile/u/:username/videos", async (req, res) => {
       [username, includePrivate]
     );
 
-    // Return same shape as /api/videos items (client expects thumbUrl/playbackUrl)
     const enriched = await Promise.all(result.rows.map((v) => toApiVideo(req, v)));
     return res.json(enriched);
   } catch (e) {
@@ -1084,8 +954,6 @@ app.get("/api/profile/u/:username/videos", async (req, res) => {
     return res.status(500).json({ error: "Failed to load uploads" });
   }
 });
-
-
 
 // -------------------------
 // VIDEOS API
@@ -1131,8 +999,6 @@ app.get("/api/categories", async (_req, res) => {
 
 // -------------------------
 // UPLOAD VIDEO
-// - local: keep mp4 on disk
-// - aws: convert to HLS, upload folder to S3 uploads bucket, store master key in DB
 // -------------------------
 app.post("/api/videos/upload", requireAuth, upload.single("video"), async (req, res) => {
   try {
@@ -1163,7 +1029,6 @@ app.post("/api/videos/upload", requireAuth, upload.single("video"), async (req, 
 
     const category = "Other";
 
-    // Thumb generation (local)
     const base = path.parse(req.file.filename).name;
     const thumbName = `${base}.jpg`;
     const thumbPath = path.join(THUMB_DIR, thumbName);
@@ -1186,20 +1051,16 @@ app.post("/api/videos/upload", requireAuth, upload.single("video"), async (req, 
       const hlsPrefix = `hls/${userId}/${token}`;
       const hlsOutDir = path.join(os.tmpdir(), `mytube-hls-${userId}-${token}`);
 
-      // 1) Generate HLS locally
       await generateHlsVOD(req.file.path, hlsOutDir);
 
-      // 2) Upload entire HLS folder to S3
       await uploadDirToS3({
         bucket: process.env.S3_UPLOADS_BUCKET,
         dirPath: hlsOutDir,
         keyPrefix: hlsPrefix,
       });
 
-      // 3) Store master playlist key in DB
       storedFilename = `${hlsPrefix}/master.m3u8`;
 
-      // 4) Optional: upload thumb to assets bucket (if you want thumbs via CDN_ASSETS)
       if (storedThumb !== "placeholder.jpg" && fs.existsSync(thumbPath)) {
         try {
           await uploadFileToS3({
@@ -1209,11 +1070,13 @@ app.post("/api/videos/upload", requireAuth, upload.single("video"), async (req, 
             contentType: "image/jpeg",
           });
         } catch (e) {
-          console.warn("Thumb upload to S3 failed (will fall back to local thumb route):", e.message);
+          console.warn(
+            "Thumb upload to S3 failed (will fall back to local thumb route):",
+            e.message
+          );
         }
       }
 
-      // cleanup local temp
       try {
         if (fs.existsSync(req.file.path)) fs.unlinkSync(req.file.path);
       } catch {}
@@ -1246,12 +1109,12 @@ app.post("/api/videos/upload", requireAuth, upload.single("video"), async (req, 
 });
 
 // -------------------------
-// Static thumbs (local placeholder + local mode thumbs)
+// Static thumbs
 // -------------------------
 app.use("/thumbs", express.static(THUMB_DIR));
 
 // -------------------------
-// LOCAL streaming endpoint (only used when VIDEO_SOURCE=local)
+// LOCAL streaming endpoint (only when VIDEO_SOURCE=local)
 // -------------------------
 app.get("/videos/:id/stream", async (req, res) => {
   if (VIDEO_SOURCE !== "local") {
@@ -1273,10 +1136,7 @@ app.get("/videos/:id/stream", async (req, res) => {
   const contentType = ext === ".mp4" ? "video/mp4" : "application/octet-stream";
 
   if (!range) {
-    res.writeHead(200, {
-      "Content-Length": fileSize,
-      "Content-Type": contentType,
-    });
+    res.writeHead(200, { "Content-Length": fileSize, "Content-Type": contentType });
     fs.createReadStream(filePath).pipe(res);
     return;
   }
@@ -1316,7 +1176,7 @@ app.delete("/api/videos/:id", requireAuth, async (req, res) => {
       return res.status(403).json({ error: "Not allowed" });
     }
 
-    const storedFilename = v.filename; // local filename OR aws key (hls/.../master.m3u8)
+    const storedFilename = v.filename;
     const storedThumb = v.thumb;
 
     await pool.query(`DELETE FROM videos WHERE id::text = $1::text`, [videoId]);
@@ -1334,19 +1194,14 @@ app.delete("/api/videos/:id", requireAuth, async (req, res) => {
         } catch {}
       }
     } else if (VIDEO_SOURCE === "aws") {
-      // ✅ HLS is a folder/prefix, not a single file
       if (storedFilename && storedFilename.includes("/master.m3u8")) {
         const prefix = storedFilename.replace(/\/master\.m3u8$/i, "");
         try {
-          await deletePrefixFromS3({
-            bucket: process.env.S3_UPLOADS_BUCKET,
-            prefix,
-          });
+          await deletePrefixFromS3({ bucket: process.env.S3_UPLOADS_BUCKET, prefix });
         } catch (e) {
           console.warn("S3 delete HLS prefix failed (ignored):", e?.message || e);
         }
       } else if (storedFilename) {
-        // fallback (single-object delete)
         try {
           await deleteFromS3({ bucket: process.env.S3_UPLOADS_BUCKET, key: storedFilename });
         } catch (e) {
@@ -1380,8 +1235,4 @@ app.get("/", (_req, res) => {
 });
 
 const PORT = process.env.PORT || 3001;
-
-app.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
-});
-
+app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
