@@ -34,6 +34,8 @@ app.set("trust proxy", 1);
 
 console.log("Using DB:", process.env.DATABASE_URL);
 
+app.set("trust proxy", 1);
+
 // -------------------------
 // CORS
 // -------------------------
@@ -851,6 +853,7 @@ app.get("/__whoami", (req, res) => {
 app.get("/", (_req, res) => {
   res.send("MYTUBE server ✅ Try /api/videos");
 });
+
 
 const PORT = process.env.PORT || 3001;
 app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
