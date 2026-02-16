@@ -144,6 +144,8 @@ router.get("/u/:username/videos", async (req, res) => {
     );
 
     // match your frontend expectations (channelUsername/channelDisplayName, etc.)
+    const b = baseUrl(req);
+
     const items = result.rows.map((r) => ({
       id: r.id,
       title: r.title,
@@ -163,11 +165,16 @@ router.get("/u/:username/videos", async (req, res) => {
       ratingAvg: r.rating_avg != null ? Number(r.rating_avg) : null,
       ratingCount: Number(r.rating_count || 0),
 
-      // keep these raw; your existing toApiVideo() builds thumbUrl/playbackUrl elsewhere
-      // If your VideoCard relies on thumbUrl/playbackUrl, tell me and I’ll align it.
-      thumb: r.thumb,
-      filename: r.filename,
+      // ✅ this is what VideoCard expects
+      thumbUrl: buildThumbUrl(req, r.thumb),
+
+      // ✅ nice to keep shape consistent across app
+      playbackUrl:
+        (process.env.VIDEO_SOURCE || "local") === "aws"
+          ? buildPlaybackUrl(req, r.filename)
+          : `${b}/videos/${r.id}/stream`,
     }));
+
 
     res.json(items);
   } catch (e) {

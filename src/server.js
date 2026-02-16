@@ -969,14 +969,88 @@ app.post("/api/videos/:id/rate", requireAuth, async (req, res) => {
 // -------------------------
 app.get("/api/videos", async (req, res) => {
   try {
-    const rows = await fetchVideosFromDb();
-    const enriched = await Promise.all(rows.map((v) => toApiVideo(req, v)));
+    const q = String(req.query.q || "").trim();
+    const category = String(req.query.category || "").trim();
+    const sort = String(req.query.sort || "newest").toLowerCase().trim();
+
+    // ORDER BY whitelist (prevents SQL injection)
+    let orderBy = "v.created_at DESC";
+    if (sort === "oldest") orderBy = "v.created_at ASC";
+    else if (sort === "views") orderBy = "v.views DESC NULLS LAST, v.created_at DESC";
+    else if (sort === "highest")
+      orderBy =
+        "COALESCE(vrs.rating_avg, 0) DESC, COALESCE(vrs.rating_count, 0) DESC, v.created_at DESC";
+
+    // Build WHERE dynamically but safely
+    const where = [`v.visibility = 'public'`];
+    const params = [];
+    let i = 1;
+
+    if (category) {
+      where.push(`v.category = $${i++}`);
+      params.push(category);
+    }
+
+    if (q) {
+      // split words, match ALL tokens somewhere
+      const tokens = q.split(/\s+/).filter(Boolean).slice(0, 10);
+      for (const t of tokens) {
+        where.push(`
+          (
+            v.title ILIKE $${i}
+            OR v.description ILIKE $${i}
+            OR v.category ILIKE $${i}
+            OR EXISTS (
+              SELECT 1
+              FROM unnest(COALESCE(v.tags, ARRAY[]::text[])) tag
+              WHERE tag ILIKE $${i}
+            )
+            OR u.username ILIKE $${i}
+            OR COALESCE(p.display_name,'') ILIKE $${i}
+          )
+        `);
+        params.push(`%${t}%`);
+        i++;
+      }
+    }
+
+    const result = await pool.query(
+      `
+      SELECT
+        v.id,
+        v.user_id,
+        v.title,
+        v.description,
+        v.category,
+        v.visibility,
+        v.filename,
+        v.thumb,
+        v.duration_text,
+        v.views,
+        v.tags,
+        v.created_at AS "createdAt",
+        v.updated_at AS "updatedAt",
+        u.username AS channel_username,
+        COALESCE(p.display_name, '') AS channel_display_name
+      FROM videos v
+      JOIN users u ON u.id = v.user_id
+      LEFT JOIN user_profiles p ON p.user_id = u.id
+      LEFT JOIN video_rating_stats vrs ON vrs.video_id = v.id
+      WHERE ${where.join(" AND ")}
+      ORDER BY ${orderBy}
+      LIMIT 200
+      `,
+      params
+    );
+
+    const enriched = await Promise.all(result.rows.map((v) => toApiVideo(req, v)));
     res.json(enriched);
   } catch (e) {
-    console.error("GET /api/videos error:", e);
+    console.error("GET /api/videos search error:", e);
     res.status(500).json({ error: "Failed to load videos" });
   }
 });
+
 
 app.get("/api/videos/:id", async (req, res) => {
   try {
