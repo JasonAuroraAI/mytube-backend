@@ -491,6 +491,58 @@ async function toApiVideo(req, v) {
 }
 
 // -------------------------
+// USER VIDEOS (Profile page needs this)
+// GET /api/profile/u/:username/videos?sort=newest|oldest|views|highest
+// -------------------------
+app.get("/api/profile/u/:username/videos", async (req, res) => {
+  try {
+    const username = decodeURIComponent(String(req.params.username || "")).trim();
+    const sort = String(req.query.sort || "newest").toLowerCase().trim();
+
+    // find user id by username
+    const u = await pool.query(
+      `SELECT id, username FROM users WHERE username = $1 LIMIT 1`,
+      [username]
+    );
+    if (!u.rows.length) return res.status(404).json({ error: "User not found" });
+
+    const channelUserId = Number(u.rows[0].id);
+
+    // If I'm viewing my own profile, include private/unlisted too
+    const requesterId = req.user?.id ? Number(req.user.id) : null;
+    const includeAll = requesterId && requesterId === channelUserId;
+
+    let orderBy = "v.created_at DESC";
+    if (sort === "oldest") orderBy = "v.created_at ASC";
+    else if (sort === "views") orderBy = "v.views DESC NULLS LAST, v.created_at DESC";
+    else if (sort === "highest")
+      orderBy =
+        "COALESCE(vrs.rating_avg, 0) DESC, COALESCE(vrs.rating_count, 0) DESC, v.created_at DESC";
+
+    const result = await pool.query(
+      `
+      SELECT v.*
+      FROM videos v
+      LEFT JOIN video_rating_stats vrs ON vrs.video_id = v.id
+      WHERE v.user_id = $1
+        AND ($2::boolean = true OR v.visibility = 'public')
+      ORDER BY ${orderBy}
+      LIMIT 200
+      `,
+      [channelUserId, includeAll]
+    );
+
+    // Return the SAME shape your app uses everywhere else
+    const enriched = await Promise.all(result.rows.map((v) => toApiVideo(req, v)));
+    res.json(enriched); // <-- IMPORTANT: array
+  } catch (e) {
+    console.error("GET /api/profile/u/:username/videos error:", e);
+    res.status(500).json({ error: "Failed to load user videos" });
+  }
+});
+
+
+// -------------------------
 // COMMENTS API (top-level + one-level replies)
 // -------------------------
 app.get("/api/videos/:videoId/comments", async (req, res) => {

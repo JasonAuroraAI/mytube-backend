@@ -57,6 +57,95 @@ router.get("/u/:username", async (req, res) => {
   });
 });
 
+
+// -------------------------
+// Public videos by username
+// GET /api/profile/u/:username/videos
+// -------------------------
+router.get("/u/:username/videos", async (req, res) => {
+  const username = String(req.params.username || "").trim();
+  if (!username) return res.status(400).json({ error: "Missing username" });
+
+  const sort = String(req.query.sort || "newest").trim().toLowerCase();
+
+  const orderBy =
+    sort === "oldest"
+      ? "v.created_at ASC"
+      : sort === "views"
+      ? "v.views DESC NULLS LAST, v.created_at DESC"
+      : sort === "highest"
+      ? "COALESCE(vrs.rating_avg, 0) DESC, COALESCE(vrs.rating_count, 0) DESC, v.created_at DESC"
+      : "v.created_at DESC";
+
+  try {
+    const result = await pool.query(
+      `
+      SELECT
+        v.id,
+        v.user_id,
+        v.title,
+        v.description,
+        v.category,
+        v.visibility,
+        v.filename,
+        v.thumb,
+        v.duration_text,
+        v.views,
+        v.tags,
+        v.created_at AS "createdAt",
+        v.updated_at AS "updatedAt",
+        u.username AS channel_username,
+        COALESCE(p.display_name, '') AS channel_display_name,
+        COALESCE(vrs.rating_avg, NULL) AS rating_avg,
+        COALESCE(vrs.rating_count, 0) AS rating_count
+      FROM videos v
+      JOIN users u ON u.id = v.user_id
+      LEFT JOIN user_profiles p ON p.user_id = u.id
+      LEFT JOIN video_rating_stats vrs ON vrs.video_id = v.id
+      WHERE lower(u.username) = lower($1)
+        AND v.visibility = 'public'
+      ORDER BY ${orderBy}
+      LIMIT 200
+      `,
+      [username]
+    );
+
+    // match your frontend expectations (channelUsername/channelDisplayName, etc.)
+    const items = result.rows.map((r) => ({
+      id: r.id,
+      title: r.title,
+      description: r.description || "",
+      category: r.category || "Other",
+      visibility: r.visibility || "public",
+
+      channelUsername: r.channel_username,
+      channelDisplayName: r.channel_display_name || r.channel_username,
+
+      createdAt: r.createdAt,
+      updatedAt: r.updatedAt,
+      views: r.views ?? 0,
+      durationText: r.duration_text || null,
+      tags: Array.isArray(r.tags) ? r.tags : [],
+
+      ratingAvg: r.rating_avg != null ? Number(r.rating_avg) : null,
+      ratingCount: Number(r.rating_count || 0),
+
+      // keep these raw; your existing toApiVideo() builds thumbUrl/playbackUrl elsewhere
+      // If your VideoCard relies on thumbUrl/playbackUrl, tell me and I’ll align it.
+      thumb: r.thumb,
+      filename: r.filename,
+    }));
+
+    res.json(items);
+  } catch (e) {
+    console.error("GET /api/profile/u/:username/videos error:", e);
+    res.status(500).json({ error: "Failed to load user videos" });
+  }
+});
+
+
+
+
 // -------------------------
 // My profile (edit preload)
 // GET /api/profile/me
