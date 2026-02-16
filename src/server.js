@@ -68,7 +68,20 @@ app.use(
 );
 
 // Ensure OPTIONS preflight works everywhere
-app.options("*", cors());
+const corsOptions = {
+  origin: (origin, cb) => {
+    if (!origin) return cb(null, true);
+    if (allowedOrigins.has(origin)) return cb(null, true);
+    return cb(new Error(`CORS blocked origin: ${origin}`));
+  },
+  credentials: true,
+  methods: ["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
+  allowedHeaders: ["Content-Type", "Authorization"],
+};
+
+app.use(cors(corsOptions));
+app.options("*", cors(corsOptions)); // ✅ important
+
 
 // -------------------------
 // Middleware
@@ -580,6 +593,168 @@ app.get("/api/videos/:videoId/comments", async (req, res) => {
     res.status(500).json({ error: "Failed to load comments" });
   }
 });
+
+app.post("/api/videos/:videoId/comments", requireAuth, async (req, res) => {
+  try {
+    const videoId = req.params.videoId;
+    const userId = req.user.id;
+
+    const body = String(req.body?.body || "").trim();
+    const parentCommentId = req.body?.parentCommentId ?? null;
+
+    if (!body) return res.status(400).json({ error: "Comment body required" });
+    if (body.length > 2000) return res.status(400).json({ error: "Comment too long" });
+
+    // validate parent if provided (must be top-level comment on same video)
+    let parentId = null;
+    if (parentCommentId !== null && parentCommentId !== undefined && parentCommentId !== "") {
+      const pid = Number(parentCommentId);
+      if (!Number.isFinite(pid)) return res.status(400).json({ error: "Bad parentCommentId" });
+
+      const parent = await pool.query(
+        `
+        SELECT id
+        FROM video_comments
+        WHERE id = $1
+          AND video_id = $2
+          AND parent_comment_id IS NULL
+        `,
+        [pid, videoId]
+      );
+
+      if (!parent.rows.length) {
+        return res
+          .status(400)
+          .json({ error: "Parent comment not found (or not top-level)" });
+      }
+
+      parentId = pid;
+    }
+
+    const result = await pool.query(
+      `
+      INSERT INTO video_comments (video_id, user_id, body, parent_comment_id)
+      VALUES ($1, $2, $3, $4)
+      RETURNING id, video_id, user_id, body, parent_comment_id, created_at, updated_at
+      `,
+      [videoId, userId, body, parentId]
+    );
+
+    const profile = await pool.query(
+      `SELECT COALESCE(display_name,'') AS display_name FROM user_profiles WHERE user_id = $1`,
+      [userId]
+    );
+    const displayName = profile.rows[0]?.display_name || req.user.username;
+
+    res.json({
+      ok: true,
+      comment: {
+        id: Number(result.rows[0].id),
+        videoId: result.rows[0].video_id,
+        userId: Number(result.rows[0].user_id),
+        username: req.user.username,
+        displayName,
+        body: result.rows[0].body,
+        parentCommentId: result.rows[0].parent_comment_id
+          ? Number(result.rows[0].parent_comment_id)
+          : null,
+        createdAt: result.rows[0].created_at,
+        updatedAt: result.rows[0].updated_at,
+        likeCount: 0,
+        likedByMe: false,
+        replies: [],
+      },
+    });
+  } catch (e) {
+    console.error("POST /api/videos/:videoId/comments error:", e);
+    res.status(500).json({ error: "Failed to post comment" });
+  }
+});
+
+app.post("/api/comments/:commentId/toggle-like", requireAuth, async (req, res) => {
+  const commentId = Number(req.params.commentId);
+  const userId = req.user.id;
+
+  if (!Number.isFinite(commentId)) return res.status(400).json({ error: "Bad comment id" });
+
+  try {
+    const existing = await pool.query(
+      `SELECT 1 FROM comment_likes WHERE comment_id = $1 AND user_id = $2`,
+      [commentId, userId]
+    );
+
+    if (existing.rows.length) {
+      await pool.query(
+        `DELETE FROM comment_likes WHERE comment_id = $1 AND user_id = $2`,
+        [commentId, userId]
+      );
+    } else {
+      await pool.query(
+        `INSERT INTO comment_likes (comment_id, user_id) VALUES ($1, $2)`,
+        [commentId, userId]
+      );
+    }
+
+    const stats = await pool.query(
+      `SELECT COUNT(*)::int AS like_count FROM comment_likes WHERE comment_id = $1`,
+      [commentId]
+    );
+
+    res.json({
+      ok: true,
+      commentId,
+      liked: !existing.rows.length,
+      likeCount: stats.rows[0].like_count,
+    });
+  } catch (e) {
+    console.error("POST /api/comments/:commentId/toggle-like error:", e);
+    res.status(500).json({ error: "Failed to toggle like" });
+  }
+});
+
+app.post("/api/videos/:id/view", requireAuth, async (req, res) => {
+  const videoId = String(req.params.id);
+  const userId = Number(req.user.id);
+
+  try {
+    const result = await pool.query(
+      `
+      WITH ins AS (
+        INSERT INTO video_views (video_id, user_id)
+        VALUES ($1::text, $2::bigint)
+        ON CONFLICT (video_id, user_id) DO NOTHING
+        RETURNING 1
+      ),
+      upd AS (
+        UPDATE videos
+        SET views = views + (SELECT COUNT(*) FROM ins)
+        WHERE id = $1::text
+        RETURNING views
+      )
+      SELECT
+        (SELECT views FROM upd) AS views,
+        (SELECT COUNT(*) FROM ins)::int AS added;
+      `,
+      [videoId, userId]
+    );
+
+    if (!result.rows.length || result.rows[0].views == null) {
+      return res.status(404).json({ error: "Video not found" });
+    }
+
+    res.json({
+      ok: true,
+      videoId,
+      views: Number(result.rows[0].views),
+      added: Number(result.rows[0].added || 0),
+    });
+  } catch (e) {
+    console.error("POST /api/videos/:id/view error:", e);
+    res.status(500).json({ error: "Failed to record view" });
+  }
+});
+
+
 
 // -------------------------
 // Ratings API
