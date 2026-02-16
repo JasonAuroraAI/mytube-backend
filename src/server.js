@@ -52,12 +52,45 @@ const allowedOrigins = new Set(
 );
 
 
-// Ensure OPTIONS preflight works everywhere
+const explicitOrigins = new Set(
+  (process.env.CLIENT_ORIGINS || "")
+    .split(",")
+    .map((s) => s.trim().replace(/\/$/, ""))
+    .filter(Boolean)
+);
+
+function isAllowedVercelOrigin(origin) {
+  try {
+    const { hostname, protocol } = new URL(origin);
+
+    // only allow https for Vercel
+    if (protocol !== "https:") return false;
+
+    // allow any vercel.app preview/prod for this project
+    // examples:
+    // mytube-frontend-omega.vercel.app
+    // mytube-frontend-git-main-xxx.vercel.app
+    if (hostname === "mytube-frontend.vercel.app") return true;
+    if (hostname.startsWith("mytube-frontend-") && hostname.endsWith(".vercel.app")) return true;
+
+    return false;
+  } catch {
+    return false;
+  }
+}
+
 const corsOptions = {
   origin: (origin, cb) => {
     if (!origin) return cb(null, true);
+
     const o = origin.replace(/\/$/, "");
-    if (allowedOrigins.has(o)) return cb(null, true);
+
+    // 1) allow explicit list (custom domains, etc)
+    if (explicitOrigins.has(o)) return cb(null, true);
+
+    // 2) allow vercel preview/prod matching pattern
+    if (isAllowedVercelOrigin(o)) return cb(null, true);
+
     return cb(new Error(`CORS blocked origin: ${origin}`));
   },
   credentials: true,
@@ -65,9 +98,9 @@ const corsOptions = {
   allowedHeaders: ["Content-Type", "Authorization"],
 };
 
-
 app.use(cors(corsOptions));
-app.options("*", cors(corsOptions)); // ✅ important
+app.options("*", cors(corsOptions));
+
 
 
 // -------------------------
