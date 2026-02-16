@@ -116,8 +116,10 @@ app.use(cookieParser());
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-const THUMB_DIR = path.join(__dirname, "data", "thumbs");
-const VIDEO_DIR = path.join(__dirname, "data", "videos");
+const DATA_ROOT = process.env.DATA_ROOT || path.join(os.tmpdir(), "mytube");
+const THUMB_DIR = path.join(DATA_ROOT, "thumbs");
+const VIDEO_DIR = path.join(DATA_ROOT, "videos");
+
 
 fs.mkdirSync(THUMB_DIR, { recursive: true });
 fs.mkdirSync(VIDEO_DIR, { recursive: true });
@@ -892,16 +894,20 @@ app.post("/api/videos/upload", requireAuth, upload.single("video"), async (req, 
 
     const userId = req.user.id;
 
-    // Basic request + file info
     log("req.user", { userId });
     log("req.body keys", Object.keys(req.body || {}));
-    log("req.file", req.file ? {
-      originalname: req.file.originalname,
-      mimetype: req.file.mimetype,
-      sizeBytes: req.file.size,
-      filename: req.file.filename,
-      path: req.file.path,
-    } : null);
+    log(
+      "req.file",
+      req.file
+        ? {
+            originalname: req.file.originalname,
+            mimetype: req.file.mimetype,
+            sizeBytes: req.file.size,
+            filename: req.file.filename,
+            path: req.file.path,
+          }
+        : null
+    );
 
     const title = String(req.body?.title || "").trim();
     const description = String(req.body?.description || "").trim();
@@ -920,7 +926,9 @@ app.post("/api/videos/upload", requireAuth, upload.single("video"), async (req, 
     const allowedVis = new Set(["public", "private", "unlisted"]);
     if (!allowedVis.has(visibility)) {
       log("FAIL validation: bad visibility", { visibility });
-      return res.status(400).json({ error: "Visibility must be public, private, or unlisted" });
+      return res
+        .status(400)
+        .json({ error: "Visibility must be public, private, or unlisted" });
     }
 
     const tags = Array.from(
@@ -935,11 +943,11 @@ app.post("/api/videos/upload", requireAuth, upload.single("video"), async (req, 
 
     const category = "Other";
 
+    // ---------- Thumbnail ----------
     const base = path.parse(req.file.filename).name;
     const thumbName = `${base}.jpg`;
     const thumbPath = path.join(THUMB_DIR, thumbName);
 
-    // ---------- Thumbnail ----------
     let storedThumb = "placeholder.jpg";
     log("THUMB start", { thumbName, thumbPath });
 
@@ -949,7 +957,10 @@ app.post("/api/videos/upload", requireAuth, upload.single("video"), async (req, 
       storedThumb = thumbName;
       log("THUMB ok", { ms: Date.now() - tThumb, storedThumb });
     } catch (e) {
-      log("THUMB failed, using placeholder", { ms: Date.now() - tThumb, error: e?.message });
+      log("THUMB failed, using placeholder", {
+        ms: Date.now() - tThumb,
+        error: e?.message,
+      });
       try {
         if (fs.existsSync(thumbPath)) fs.unlinkSync(thumbPath);
       } catch (cleanupErr) {
@@ -957,35 +968,44 @@ app.post("/api/videos/upload", requireAuth, upload.single("video"), async (req, 
       }
     }
 
+    // What we store in DB (local filename or S3 key)
     let storedFilename = req.file.filename;
 
-    // ---------- AWS pipeline ----------
+    // ---------- AWS pipeline (NO HLS for now) ----------
     if (VIDEO_SOURCE === "aws") {
-      const token = crypto.randomBytes(8).toString("hex");
-      const hlsPrefix = `hls/${userId}/${token}`;
-      const hlsOutDir = path.join(os.tmpdir(), `mytube-hls-${userId}-${token}`);
+      if (!process.env.S3_UPLOADS_BUCKET) {
+        throw new Error("Missing env S3_UPLOADS_BUCKET while VIDEO_SOURCE=aws");
+      }
 
-      // HLS
-      log("HLS start", { hlsPrefix, hlsOutDir });
-      const tHls = Date.now();
-      await generateHlsVOD(req.file.path, hlsOutDir);
-      log("HLS ok", { ms: Date.now() - tHls });
-
-      // Upload HLS to S3
-      log("S3 uploadDir start", { bucket: process.env.S3_UPLOADS_BUCKET, keyPrefix: hlsPrefix });
-      const tS3Dir = Date.now();
-      await uploadDirToS3({
+      // Store mp4 under a stable prefix per user
+      const mp4Key = `uploads/${userId}/${req.file.filename}`;
+      log("S3 MP4 upload start", {
         bucket: process.env.S3_UPLOADS_BUCKET,
-        dirPath: hlsOutDir,
-        keyPrefix: hlsPrefix,
+        key: mp4Key,
       });
-      log("S3 uploadDir ok", { ms: Date.now() - tS3Dir });
 
-      storedFilename = `${hlsPrefix}/master.m3u8`;
+      const tS3Mp4 = Date.now();
+      await uploadFileToS3({
+        bucket: process.env.S3_UPLOADS_BUCKET,
+        key: mp4Key,
+        filePath: req.file.path,
+        contentType: "video/mp4",
+      });
+      log("S3 MP4 upload ok", { ms: Date.now() - tS3Mp4 });
 
-      // Upload thumb to S3 (optional)
-      if (storedThumb !== "placeholder.jpg" && fs.existsSync(thumbPath)) {
-        log("S3 thumb upload start", { bucket: process.env.S3_ASSETS_BUCKET, key: storedThumb });
+      storedFilename = mp4Key;
+
+      // Upload thumb to S3 assets bucket (optional)
+      if (
+        storedThumb !== "placeholder.jpg" &&
+        fs.existsSync(thumbPath) &&
+        process.env.S3_ASSETS_BUCKET
+      ) {
+        log("S3 thumb upload start", {
+          bucket: process.env.S3_ASSETS_BUCKET,
+          key: storedThumb,
+        });
+
         const tS3Thumb = Date.now();
         try {
           await uploadFileToS3({
@@ -998,25 +1018,36 @@ app.post("/api/videos/upload", requireAuth, upload.single("video"), async (req, 
         } catch (e) {
           log("S3 thumb upload failed", { ms: Date.now() - tS3Thumb, error: e?.message });
         }
+      } else {
+        log("S3 thumb upload skipped", {
+          storedThumb,
+          hasThumbFile: fs.existsSync(thumbPath),
+          hasAssetsBucket: !!process.env.S3_ASSETS_BUCKET,
+        });
       }
 
-      // Cleanup
-      log("Cleanup start (local upload + temp HLS)");
+      // Cleanup local temp files
+      log("Cleanup start (local upload + local thumb)");
       try {
         if (fs.existsSync(req.file.path)) fs.unlinkSync(req.file.path);
       } catch (e) {
         log("Cleanup: delete local upload failed", { error: e?.message });
       }
       try {
-        fs.rmSync(hlsOutDir, { recursive: true, force: true });
+        if (storedThumb !== "placeholder.jpg" && fs.existsSync(thumbPath)) fs.unlinkSync(thumbPath);
       } catch (e) {
-        log("Cleanup: delete hlsOutDir failed", { error: e?.message });
+        log("Cleanup: delete local thumb failed", { error: e?.message });
       }
       log("Cleanup done");
     }
 
     // ---------- DB insert ----------
-    log("DB insert start", { storedFilename, storedThumb, visibility, tagsCount: tags.length });
+    log("DB insert start", {
+      storedFilename,
+      storedThumb,
+      visibility,
+      tagsCount: tags.length,
+    });
     const tDb = Date.now();
 
     const ins = await pool.query(
@@ -1057,6 +1088,7 @@ app.post("/api/videos/upload", requireAuth, upload.single("video"), async (req, 
     return res.status(500).json({ error: "Failed to upload video" });
   }
 });
+
 
 
 // -------------------------

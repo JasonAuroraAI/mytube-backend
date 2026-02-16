@@ -62,18 +62,50 @@ export async function uploadDirToS3({ bucket, dirPath, keyPrefix }) {
 }
 
 // Upload a single file (used for thumbs / direct uploads)
-export async function uploadFileToS3({ bucket, key, filePath, contentType }) {
+export async function uploadFileToS3({
+  bucket,
+  key,
+  filePath,
+  contentType,
+  cacheControl,          // optional override
+  contentDisposition,    // optional override
+}) {
+  const ct = contentType || contentTypeForKey(key);
+
+  // sensible defaults
+  const isPlaylist = String(key).toLowerCase().endsWith(".m3u8");
+  const isSegment  = String(key).toLowerCase().endsWith(".ts");
+  const isThumb    = /\.(jpg|jpeg)$/i.test(String(key));
+  const isMp4      = String(key).toLowerCase().endsWith(".mp4");
+
+  const cc =
+    cacheControl ??
+    (isPlaylist
+      ? "no-cache"
+      : isMp4 || isSegment || isThumb
+      ? "public, max-age=31536000, immutable"
+      : "public, max-age=3600");
+
+  // Helps some browsers/players; also makes downloading nicer if someone saves it.
+  // For streaming MP4 via <video>, "inline" is what you want.
+  const cd =
+    contentDisposition ??
+    (isMp4 ? `inline; filename="${path.basename(key)}"` : undefined);
+
   await s3.send(
     new PutObjectCommand({
       Bucket: bucket,
       Key: key,
       Body: fs.createReadStream(filePath),
-      ContentType: contentType || contentTypeForKey(key),
+      ContentType: ct,
+      CacheControl: cc,
+      ...(cd ? { ContentDisposition: cd } : {}),
     })
   );
 
   return { bucket, key };
 }
+
 
 // Delete a single object
 export async function deleteFromS3({ bucket, key }) {
