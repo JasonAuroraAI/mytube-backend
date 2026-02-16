@@ -9,6 +9,39 @@ function requireAuth(req, res, next) {
   next();
 }
 
+function baseUrl(req) {
+  return `${req.protocol}://${req.get("host")}`;
+}
+
+function buildPlaybackUrl(req, filename) {
+  const VIDEO_SOURCE = process.env.VIDEO_SOURCE || "local";
+  const CDN_UPLOADS_BASE_URL = (process.env.CDN_UPLOADS_BASE_URL || "").replace(/\/$/, "");
+
+  if (VIDEO_SOURCE === "aws") {
+    if (CDN_UPLOADS_BASE_URL) return `${CDN_UPLOADS_BASE_URL}/${filename}`;
+    if (process.env.S3_UPLOADS_BUCKET && process.env.AWS_REGION) {
+      return `https://${process.env.S3_UPLOADS_BUCKET}.s3.${process.env.AWS_REGION}.amazonaws.com/${filename}`;
+    }
+  }
+
+  // local fallback (server.js stream endpoint)
+  // NOTE: profile page uses /videos/:id/stream style
+  return `${baseUrl(req)}/videos/__ID__/stream`; // replaced per-video below
+}
+
+function buildThumbUrl(req, thumb) {
+  const VIDEO_SOURCE = process.env.VIDEO_SOURCE || "local";
+  const CDN_ASSETS_BASE_URL = (process.env.CDN_ASSETS_BASE_URL || "").replace(/\/$/, "");
+
+  if (VIDEO_SOURCE === "aws" && thumb && thumb !== "placeholder.jpg" && CDN_ASSETS_BASE_URL) {
+    return `${CDN_ASSETS_BASE_URL}/${thumb}`;
+  }
+
+  const b = baseUrl(req);
+  return thumb ? `${b}/thumbs/${thumb}` : `${b}/thumbs/placeholder.jpg`;
+}
+
+
 // -------------------------
 // Public profile by username
 // GET /api/profile/u/:username

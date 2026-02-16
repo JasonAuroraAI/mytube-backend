@@ -494,35 +494,60 @@ async function toApiVideo(req, v) {
 // USER VIDEOS (Profile page needs this)
 // GET /api/profile/u/:username/videos?sort=newest|oldest|views|highest
 // -------------------------
+// GET /api/profile/u/:username/videos
 app.get("/api/profile/u/:username/videos", async (req, res) => {
   try {
-    const username = decodeURIComponent(String(req.params.username || "")).trim();
+    const username = String(req.params.username || "").trim();
     const sort = String(req.query.sort || "newest").toLowerCase().trim();
 
-    // find user id by username
+    if (!username) return res.status(400).json({ error: "Missing username" });
+
+    // Find the user (case-insensitive)
     const u = await pool.query(
-      `SELECT id, username FROM users WHERE username = $1 LIMIT 1`,
+      `SELECT id, username FROM users WHERE lower(username) = lower($1) LIMIT 1`,
       [username]
     );
     if (!u.rows.length) return res.status(404).json({ error: "User not found" });
 
     const channelUserId = Number(u.rows[0].id);
 
-    // If I'm viewing my own profile, include private/unlisted too
+    // If viewing your own profile, include private/unlisted too
     const requesterId = req.user?.id ? Number(req.user.id) : null;
-    const includeAll = requesterId && requesterId === channelUserId;
+    const includeAll = requesterId != null && requesterId === channelUserId;
 
+    // Sorting
     let orderBy = "v.created_at DESC";
-    if (sort === "oldest") orderBy = "v.created_at ASC";
-    else if (sort === "views") orderBy = "v.views DESC NULLS LAST, v.created_at DESC";
-    else if (sort === "highest")
+    if (sort === "oldest") {
+      orderBy = "v.created_at ASC";
+    } else if (sort === "views") {
+      orderBy = "v.views DESC NULLS LAST, v.created_at DESC";
+    } else if (sort === "highest") {
       orderBy =
         "COALESCE(vrs.rating_avg, 0) DESC, COALESCE(vrs.rating_count, 0) DESC, v.created_at DESC";
+    }
 
+    // Fetch videos for that user
     const result = await pool.query(
       `
-      SELECT v.*
+      SELECT
+        v.id,
+        v.user_id,
+        v.title,
+        v.description,
+        v.category,
+        v.visibility,
+        v.filename,
+        v.thumb,
+        v.duration_text,
+        v.views,
+        v.tags,
+        v.created_at AS "createdAt",
+        v.updated_at AS "updatedAt",
+        u.username AS channel_username,
+        COALESCE(p.display_name, '') AS channel_display_name
       FROM videos v
+      JOIN users u ON u.id = v.user_id
+      LEFT JOIN user_profiles p ON p.user_id = u.id
       LEFT JOIN video_rating_stats vrs ON vrs.video_id = v.id
       WHERE v.user_id = $1
         AND ($2::boolean = true OR v.visibility = 'public')
@@ -532,14 +557,67 @@ app.get("/api/profile/u/:username/videos", async (req, res) => {
       [channelUserId, includeAll]
     );
 
-    // Return the SAME shape your app uses everywhere else
+    // Return the SAME shape used everywhere else (thumbUrl + playbackUrl, etc.)
     const enriched = await Promise.all(result.rows.map((v) => toApiVideo(req, v)));
-    res.json(enriched); // <-- IMPORTANT: array
+    return res.json(enriched); // IMPORTANT: return an array
   } catch (e) {
     console.error("GET /api/profile/u/:username/videos error:", e);
-    res.status(500).json({ error: "Failed to load user videos" });
+    return res.status(500).json({ error: "Failed to load user videos" });
   }
 });
+
+
+app.delete("/api/videos/:id", requireAuth, async (req, res) => {
+  const videoId = String(req.params.id);
+  const userId = Number(req.user.id);
+
+  try {
+    // fetch video first (ownership + filenames)
+    const vRes = await pool.query(
+      `SELECT id, user_id, filename, thumb FROM videos WHERE id::text = $1::text LIMIT 1`,
+      [videoId]
+    );
+    const v = vRes.rows[0];
+    if (!v) return res.status(404).json({ error: "Video not found" });
+    if (Number(v.user_id) !== userId) return res.status(403).json({ error: "Not allowed" });
+
+    // delete DB row first (or last — either is fine; I prefer DB last if you want strictness)
+    await pool.query(`DELETE FROM videos WHERE id::text = $1::text`, [videoId]);
+
+    const VIDEO_SOURCE = process.env.VIDEO_SOURCE || "local";
+
+    // remove storage
+    if (VIDEO_SOURCE === "aws") {
+      // v.filename is your S3 key (e.g. uploads/<userId>/<file>.mp4)
+      if (process.env.S3_UPLOADS_BUCKET && v.filename) {
+        await deleteFromS3({ bucket: process.env.S3_UPLOADS_BUCKET, key: v.filename });
+      }
+      // thumb key in assets bucket (if you store thumbs there)
+      if (process.env.S3_ASSETS_BUCKET && v.thumb && v.thumb !== "placeholder.jpg") {
+        await deleteFromS3({ bucket: process.env.S3_ASSETS_BUCKET, key: v.thumb });
+      }
+    } else {
+      // local cleanup (only if you use VIDEO_SOURCE=local)
+      try {
+        const filePath = path.join(VIDEO_DIR, v.filename);
+        if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
+      } catch {}
+      try {
+        if (v.thumb && v.thumb !== "placeholder.jpg") {
+          const thumbPath = path.join(THUMB_DIR, v.thumb);
+          if (fs.existsSync(thumbPath)) fs.unlinkSync(thumbPath);
+        }
+      } catch {}
+    }
+
+    return res.json({ ok: true, id: videoId });
+  } catch (e) {
+    console.error("DELETE /api/videos/:id error:", e);
+    return res.status(500).json({ error: "Failed to delete video" });
+  }
+});
+
+
 
 
 // -------------------------
