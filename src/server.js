@@ -138,14 +138,23 @@ async function getUserFromSession(req) {
   if (!sid) return null;
 
   const result = await pool.query(
-    `
-    SELECT u.id, u.username, u.tokens, u.rating, u.review_count
-    FROM sessions s
-    JOIN users u ON u.id = s.user_id
-    WHERE s.id = $1 AND s.expires_at > now()
-    `,
-    [sid]
-  );
+  `
+  SELECT
+    u.id,
+    u.username,
+    u.tokens,
+    COALESCE(AVG(vr.rating)::float, 0) AS rating,
+    COALESCE(COUNT(vr.rating)::int, 0) AS review_count
+  FROM sessions s
+  JOIN users u ON u.id = s.user_id
+  LEFT JOIN videos v ON v.user_id = u.id
+  LEFT JOIN video_ratings vr ON vr.video_id = v.id
+  WHERE s.id = $1 AND s.expires_at > now()
+  GROUP BY u.id
+  `,
+  [sid]
+);
+
 
   if (!result.rows[0]) return null;
 
@@ -493,8 +502,6 @@ async function toApiVideo(req, v) {
 // -------------------------
 // USER VIDEOS (Profile page needs this)
 // GET /api/profile/u/:username/videos?sort=newest|oldest|views|highest
-// -------------------------
-// GET /api/profile/u/:username/videos
 app.get("/api/profile/u/:username/videos", async (req, res) => {
   try {
     const username = String(req.params.username || "").trim();
@@ -617,6 +624,117 @@ app.delete("/api/videos/:id", requireAuth, async (req, res) => {
   }
 });
 
+app.delete("/api/comments/:commentId", requireAuth, async (req, res) => {
+  const commentId = Number(req.params.commentId);
+  const userId = Number(req.user.id);
+
+  if (!Number.isFinite(commentId)) {
+    return res.status(400).json({ error: "Bad comment id" });
+  }
+
+  try {
+    // Fetch comment (ownership + video_id)
+    const cRes = await pool.query(
+      `
+      SELECT id, user_id, video_id, parent_comment_id
+      FROM video_comments
+      WHERE id = $1
+      LIMIT 1
+      `,
+      [commentId]
+    );
+
+    const c = cRes.rows[0];
+    if (!c) return res.status(404).json({ error: "Comment not found" });
+
+    if (Number(c.user_id) !== userId) {
+      return res.status(403).json({ error: "Not allowed" });
+    }
+
+    await pool.query("BEGIN");
+
+    // If deleting a top-level comment, delete its replies too (1-level replies system)
+    if (c.parent_comment_id == null) {
+      // delete likes on replies
+      await pool.query(
+        `
+        DELETE FROM comment_likes
+        WHERE comment_id IN (
+          SELECT id FROM video_comments WHERE parent_comment_id = $1
+        )
+        `,
+        [commentId]
+      );
+
+      // delete replies
+      await pool.query(
+        `DELETE FROM video_comments WHERE parent_comment_id = $1`,
+        [commentId]
+      );
+    }
+
+    // delete likes on the comment itself
+    await pool.query(`DELETE FROM comment_likes WHERE comment_id = $1`, [commentId]);
+
+    // delete the comment
+    await pool.query(`DELETE FROM video_comments WHERE id = $1`, [commentId]);
+
+    await pool.query("COMMIT");
+
+    return res.json({ ok: true, commentId });
+  } catch (e) {
+    await pool.query("ROLLBACK").catch(() => {});
+    console.error("DELETE /api/comments/:commentId error:", e);
+    return res.status(500).json({ error: "Failed to delete comment" });
+  }
+});
+
+app.patch("/api/comments/:commentId", requireAuth, async (req, res) => {
+  const commentId = Number(req.params.commentId);
+  const userId = Number(req.user.id);
+  const body = String(req.body?.body || "").trim();
+
+  if (!Number.isFinite(commentId)) {
+    return res.status(400).json({ error: "Bad comment id" });
+  }
+  if (!body) return res.status(400).json({ error: "Comment body required" });
+  if (body.length > 2000) return res.status(400).json({ error: "Comment too long" });
+
+  try {
+    const existing = await pool.query(
+      `SELECT id, user_id FROM video_comments WHERE id = $1 LIMIT 1`,
+      [commentId]
+    );
+    const c = existing.rows[0];
+    if (!c) return res.status(404).json({ error: "Comment not found" });
+
+    if (Number(c.user_id) !== userId) {
+      return res.status(403).json({ error: "Not allowed" });
+    }
+
+    const upd = await pool.query(
+      `
+      UPDATE video_comments
+      SET body = $2, updated_at = now()
+      WHERE id = $1
+      RETURNING id, body, updated_at
+      `,
+      [commentId, body]
+    );
+
+    return res.json({
+      ok: true,
+      comment: {
+        id: Number(upd.rows[0].id),
+        body: upd.rows[0].body,
+        updatedAt: upd.rows[0].updated_at,
+      },
+    });
+  } catch (e) {
+    console.error("PATCH /api/comments/:commentId error:", e);
+    return res.status(500).json({ error: "Failed to edit comment" });
+  }
+});
 
 
 
@@ -947,6 +1065,39 @@ app.post("/api/videos/:id/rate", requireAuth, async (req, res) => {
       `,
       [videoId, userId, rating]
     );
+
+    // 1) Who owns this video?
+    const ownerRes = await pool.query(
+      `SELECT user_id FROM videos WHERE id::text = $1::text LIMIT 1`,
+      [videoId]
+    );
+    const ownerId = ownerRes.rows[0]?.user_id;
+    if (!ownerId) return res.status(404).json({ error: "Video not found" });
+
+    // 2) Recompute owner's overall rating across ALL ratings on ALL their videos
+    const ownerAgg = await pool.query(
+      `
+      SELECT
+        COALESCE(AVG(vr.rating)::float, 0) AS avg,
+        COUNT(*)::int AS count
+      FROM video_ratings vr
+      JOIN videos v ON v.id = vr.video_id
+      WHERE v.user_id = $1
+      `,
+      [ownerId]
+    );
+
+    // 3) Persist to users table so /api/profile/u/:username stays correct
+    await pool.query(
+      `
+      UPDATE users
+      SET rating = $2::float,
+          review_count = $3::int
+      WHERE id = $1
+      `,
+      [ownerId, ownerAgg.rows[0].avg, ownerAgg.rows[0].count]
+    );
+
 
     const agg = await pool.query(
       `SELECT AVG(rating)::float AS avg, COUNT(*)::int AS count
