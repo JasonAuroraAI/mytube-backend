@@ -34,8 +34,6 @@ app.set("trust proxy", 1);
 
 console.log("Using DB:", process.env.DATABASE_URL);
 
-app.set("trust proxy", 1);
-
 // -------------------------
 // CORS
 // -------------------------
@@ -49,35 +47,24 @@ app.set("trust proxy", 1);
 const allowedOrigins = new Set(
   (process.env.CLIENT_ORIGINS || "http://localhost:5173")
     .split(",")
-    .map((s) => s.trim())
+    .map((s) => s.trim().replace(/\/$/, "")) // ✅ remove trailing slash
     .filter(Boolean)
 );
 
-app.use(
-  cors({
-    origin: (origin, cb) => {
-      // allow server-to-server / curl / health checks
-      if (!origin) return cb(null, true);
-
-      if (allowedOrigins.has(origin)) return cb(null, true);
-
-      return cb(new Error(`CORS blocked origin: ${origin}`));
-    },
-    credentials: true,
-  })
-);
 
 // Ensure OPTIONS preflight works everywhere
 const corsOptions = {
   origin: (origin, cb) => {
     if (!origin) return cb(null, true);
-    if (allowedOrigins.has(origin)) return cb(null, true);
+    const o = origin.replace(/\/$/, "");
+    if (allowedOrigins.has(o)) return cb(null, true);
     return cb(new Error(`CORS blocked origin: ${origin}`));
   },
   credentials: true,
   methods: ["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
   allowedHeaders: ["Content-Type", "Authorization"],
 };
+
 
 app.use(cors(corsOptions));
 app.options("*", cors(corsOptions)); // ✅ important
@@ -858,19 +845,48 @@ app.get("/api/categories", async (_req, res) => {
 // Upload video
 // -------------------------
 app.post("/api/videos/upload", requireAuth, upload.single("video"), async (req, res) => {
+  const uploadId = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+  const t0 = Date.now();
+
+  const log = (msg, extra) => {
+    const ms = Date.now() - t0;
+    if (extra !== undefined) console.log(`[upload ${uploadId}] +${ms}ms ${msg}`, extra);
+    else console.log(`[upload ${uploadId}] +${ms}ms ${msg}`);
+  };
+
   try {
+    log("START /api/videos/upload");
+
     const userId = req.user.id;
+
+    // Basic request + file info
+    log("req.user", { userId });
+    log("req.body keys", Object.keys(req.body || {}));
+    log("req.file", req.file ? {
+      originalname: req.file.originalname,
+      mimetype: req.file.mimetype,
+      sizeBytes: req.file.size,
+      filename: req.file.filename,
+      path: req.file.path,
+    } : null);
 
     const title = String(req.body?.title || "").trim();
     const description = String(req.body?.description || "").trim();
     const visibility = String(req.body?.visibility || "public").toLowerCase();
     const tagsRaw = String(req.body?.tags || "");
 
-    if (!title) return res.status(400).json({ error: "Title is required" });
-    if (!req.file) return res.status(400).json({ error: "MP4 file is required" });
+    if (!title) {
+      log("FAIL validation: missing title");
+      return res.status(400).json({ error: "Title is required" });
+    }
+    if (!req.file) {
+      log("FAIL validation: missing file");
+      return res.status(400).json({ error: "MP4 file is required" });
+    }
 
     const allowedVis = new Set(["public", "private", "unlisted"]);
     if (!allowedVis.has(visibility)) {
+      log("FAIL validation: bad visibility", { visibility });
       return res.status(400).json({ error: "Visibility must be public, private, or unlisted" });
     }
 
@@ -890,35 +906,54 @@ app.post("/api/videos/upload", requireAuth, upload.single("video"), async (req, 
     const thumbName = `${base}.jpg`;
     const thumbPath = path.join(THUMB_DIR, thumbName);
 
+    // ---------- Thumbnail ----------
     let storedThumb = "placeholder.jpg";
+    log("THUMB start", { thumbName, thumbPath });
+
+    const tThumb = Date.now();
     try {
       await generateThumbnailHalfwayWithFallback(req.file.path, thumbPath);
       storedThumb = thumbName;
+      log("THUMB ok", { ms: Date.now() - tThumb, storedThumb });
     } catch (e) {
-      console.warn("Thumb gen failed, using placeholder:", e.message);
+      log("THUMB failed, using placeholder", { ms: Date.now() - tThumb, error: e?.message });
       try {
         if (fs.existsSync(thumbPath)) fs.unlinkSync(thumbPath);
-      } catch {}
+      } catch (cleanupErr) {
+        log("THUMB cleanup failed", { error: cleanupErr?.message });
+      }
     }
 
     let storedFilename = req.file.filename;
 
+    // ---------- AWS pipeline ----------
     if (VIDEO_SOURCE === "aws") {
       const token = crypto.randomBytes(8).toString("hex");
       const hlsPrefix = `hls/${userId}/${token}`;
       const hlsOutDir = path.join(os.tmpdir(), `mytube-hls-${userId}-${token}`);
 
+      // HLS
+      log("HLS start", { hlsPrefix, hlsOutDir });
+      const tHls = Date.now();
       await generateHlsVOD(req.file.path, hlsOutDir);
+      log("HLS ok", { ms: Date.now() - tHls });
 
+      // Upload HLS to S3
+      log("S3 uploadDir start", { bucket: process.env.S3_UPLOADS_BUCKET, keyPrefix: hlsPrefix });
+      const tS3Dir = Date.now();
       await uploadDirToS3({
         bucket: process.env.S3_UPLOADS_BUCKET,
         dirPath: hlsOutDir,
         keyPrefix: hlsPrefix,
       });
+      log("S3 uploadDir ok", { ms: Date.now() - tS3Dir });
 
       storedFilename = `${hlsPrefix}/master.m3u8`;
 
+      // Upload thumb to S3 (optional)
       if (storedThumb !== "placeholder.jpg" && fs.existsSync(thumbPath)) {
+        log("S3 thumb upload start", { bucket: process.env.S3_ASSETS_BUCKET, key: storedThumb });
+        const tS3Thumb = Date.now();
         try {
           await uploadFileToS3({
             bucket: process.env.S3_ASSETS_BUCKET,
@@ -926,18 +961,30 @@ app.post("/api/videos/upload", requireAuth, upload.single("video"), async (req, 
             filePath: thumbPath,
             contentType: "image/jpeg",
           });
+          log("S3 thumb upload ok", { ms: Date.now() - tS3Thumb });
         } catch (e) {
-          console.warn("Thumb upload to S3 failed:", e.message);
+          log("S3 thumb upload failed", { ms: Date.now() - tS3Thumb, error: e?.message });
         }
       }
 
+      // Cleanup
+      log("Cleanup start (local upload + temp HLS)");
       try {
         if (fs.existsSync(req.file.path)) fs.unlinkSync(req.file.path);
-      } catch {}
+      } catch (e) {
+        log("Cleanup: delete local upload failed", { error: e?.message });
+      }
       try {
         fs.rmSync(hlsOutDir, { recursive: true, force: true });
-      } catch {}
+      } catch (e) {
+        log("Cleanup: delete hlsOutDir failed", { error: e?.message });
+      }
+      log("Cleanup done");
     }
+
+    // ---------- DB insert ----------
+    log("DB insert start", { storedFilename, storedThumb, visibility, tagsCount: tags.length });
+    const tDb = Date.now();
 
     const ins = await pool.query(
       `
@@ -949,18 +996,35 @@ app.post("/api/videos/upload", requireAuth, upload.single("video"), async (req, 
     );
 
     const insertedId = ins.rows[0].id;
+    log("DB insert ok", { ms: Date.now() - tDb, insertedId });
+
+    // ---------- Response build ----------
+    log("Fetch inserted video + build response start");
+    const tResp = Date.now();
     const v = await fetchVideoById(insertedId);
-    return res.json({ ok: true, video: await toApiVideo(req, v) });
+    const apiVideo = await toApiVideo(req, v);
+    log("Response build ok", { ms: Date.now() - tResp });
+
+    log("DONE ok", { totalMs: Date.now() - t0 });
+    return res.json({ ok: true, video: apiVideo });
   } catch (e) {
-    console.error("Upload error:", e);
+    log("Upload error", { error: e?.message, stack: e?.stack });
+
     if (req.file?.path) {
+      log("Attempt cleanup of req.file.path", { path: req.file.path });
       try {
         fs.unlinkSync(req.file.path);
-      } catch {}
+        log("Cleanup req.file.path ok");
+      } catch (cleanupErr) {
+        log("Cleanup req.file.path failed", { error: cleanupErr?.message });
+      }
     }
+
+    log("DONE error", { totalMs: Date.now() - t0 });
     return res.status(500).json({ error: "Failed to upload video" });
   }
 });
+
 
 // -------------------------
 // Static thumbs (local placeholder + local mode thumbs)
