@@ -239,6 +239,8 @@ function runCmd(cmd, args) {
   return new Promise((resolve, reject) => {
     const p = spawn(cmd, args, { windowsHide: true });
 
+    console.log("RUN:", cmd, args.map(a => JSON.stringify(a)).join(" "));
+
     let out = "";
     let err = "";
 
@@ -256,23 +258,22 @@ function runCmd(cmd, args) {
 async function generateHls(inputPath, outDir) {
   fs.mkdirSync(outDir, { recursive: true });
 
+  const filter = [
+    "[0:v]split=2[v1][v2];",
+    "[v1]scale=854:480:force_original_aspect_ratio=decrease," +
+      "pad=854:480:(854-iw)/2:(480-ih)/2," +
+      "setsar=1,format=yuv420p[v1out];",
+    "[v2]scale=1280:720:force_original_aspect_ratio=decrease," +
+      "pad=1280:720:(1280-iw)/2:(720-ih)/2," +
+      "setsar=1,format=yuv420p[v2out];",
+  ].join("");
+
   const args = [
     "-y",
     "-i", inputPath,
 
-    // Letterbox/pillarbox (no stretch) + exact output frames
-    "-filter_complex",
-      [
-        "[0:v]split=2[v1][v2];",
+    "-filter_complex", filter,
 
-        "[v1]scale=854:480:force_original_aspect_ratio=decrease," +
-          "pad=854:480:(w-iw)/2:(h-ih)/2," +
-          "setsar=1,format=yuv420p[v1out];",
-
-        "[v2]scale=1280:720:force_original_aspect_ratio=decrease," +
-          "pad=1280:720:(w-iw)/2:(h-ih)/2," +
-          "setsar=1,format=yuv420p[v2out];",
-      ].join(" "),
     // ✅ Map video+audio per variant (audio duplicated)
     "-map", "[v1out]",
     "-map", "0:a?",
@@ -315,7 +316,6 @@ async function generateHls(inputPath, outDir) {
     "-hls_segment_filename", path.join(outDir, "v%v", "seg_%05d.ts"),
     "-master_pl_name", "master.m3u8",
 
-    // ✅ Now each variant uses its own audio stream
     "-var_stream_map", "v:0,a:0 v:1,a:1",
 
     path.join(outDir, "v%v", "playlist.m3u8"),
