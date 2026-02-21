@@ -16,6 +16,9 @@ import crypto from "crypto";
 import { spawn } from "child_process";
 import os from "os";
 
+import { registerGeneratePublish } from "./generatePublish.js";
+
+
 // ✅ S3 helpers (single import, consistent exports)
 import {
   uploadDirToS3,
@@ -213,11 +216,18 @@ const upload = multer({
     },
   }),
   limits: { fileSize: 1024 * 1024 * 1024 }, // 1GB
+
   fileFilter: (_req, file, cb) => {
-    const ok =
-      file.mimetype === "video/mp4" ||
-      path.extname(file.originalname).toLowerCase() === ".mp4";
-    cb(ok ? null : new Error("Only .mp4 allowed"), ok);
+    const mimetype = String(file.mimetype || "");
+    const ext = path.extname(file.originalname || "").toLowerCase();
+
+    // allow "video/*" OR common video extensions (covers octet-stream uploads)
+    const commonVideoExts = new Set([
+      ".mp4", ".mov", ".mkv", ".webm", ".avi", ".m4v", ".mpeg", ".mpg",
+    ]);
+
+    const ok = mimetype.startsWith("video/") || commonVideoExts.has(ext);
+    cb(ok ? null : new Error("Only video files allowed"), ok);
   },
 });
 
@@ -240,6 +250,78 @@ function runCmd(cmd, args) {
       else reject(new Error(err || `${cmd} exited with code ${code}`));
     });
   });
+}
+
+async function generateHls(inputPath, outDir) {
+  fs.mkdirSync(outDir, { recursive: true });
+
+  const args = [
+    "-y",
+    "-i", inputPath,
+
+    // Letterbox/pillarbox (no stretch) + exact output frames
+    "-filter_complex",
+    [
+      "[0:v]split=2[v1][v2];",
+
+      "[v1]scale=w=854:h=480:force_original_aspect_ratio=decrease," +
+        "pad=854:480:(ow-iw)/2:(oh-ih)/2," +
+        "setsar=1[v1out];",
+
+      "[v2]scale=w=1280:h=720:force_original_aspect_ratio=decrease," +
+        "pad=1280:720:(ow-iw)/2:(oh-ih)/2," +
+        "setsar=1[v2out];",
+    ].join(" "),
+
+    // ✅ Map video+audio per variant (audio duplicated)
+    "-map", "[v1out]",
+    "-map", "0:a?",
+    "-map", "[v2out]",
+    "-map", "0:a?",
+
+    // Video encodes
+    "-c:v:0", "libx264",
+    "-profile:v:0", "main",
+    "-crf:v:0", "20",
+    "-preset", "veryfast",
+    "-g", "48",
+    "-keyint_min", "48",
+    "-sc_threshold", "0",
+
+    "-c:v:1", "libx264",
+    "-profile:v:1", "main",
+    "-crf:v:1", "20",
+    "-preset", "veryfast",
+    "-g", "48",
+    "-keyint_min", "48",
+    "-sc_threshold", "0",
+
+    // ✅ Audio encodes (one for each variant)
+    "-c:a:0", "aac",
+    "-b:a:0", "128k",
+    "-ac:a:0", "2",
+
+    "-c:a:1", "aac",
+    "-b:a:1", "128k",
+    "-ac:a:1", "2",
+
+    // HLS output
+    "-f", "hls",
+    "-hls_time", "4",
+    "-hls_playlist_type", "vod",
+    "-hls_flags", "independent_segments",
+    "-hls_segment_type", "mpegts",
+
+    "-hls_segment_filename", path.join(outDir, "v%v", "seg_%05d.ts"),
+    "-master_pl_name", "master.m3u8",
+
+    // ✅ Now each variant uses its own audio stream
+    "-var_stream_map", "v:0,a:0 v:1,a:1",
+
+    path.join(outDir, "v%v", "playlist.m3u8"),
+  ];
+
+  await runCmd("ffmpeg", args);
 }
 
 async function getVideoDurationSeconds(videoPath) {
@@ -499,6 +581,14 @@ async function toApiVideo(req, v) {
   };
 }
 
+registerGeneratePublish(app, {
+  pool,
+  requireAuth,
+  uploadFileToS3,
+  VIDEO_SOURCE,
+  VIDEO_DIR,
+});
+
 // -------------------------
 // USER VIDEOS (Profile page needs this)
 // GET /api/profile/u/:username/videos?sort=newest|oldest|views|highest
@@ -601,7 +691,17 @@ app.delete("/api/videos/:id", requireAuth, async (req, res) => {
       }
       // thumb key in assets bucket (if you store thumbs there)
       if (process.env.S3_ASSETS_BUCKET && v.thumb && v.thumb !== "placeholder.jpg") {
-        await deleteFromS3({ bucket: process.env.S3_ASSETS_BUCKET, key: v.thumb });
+        if (process.env.S3_UPLOADS_BUCKET && v.filename) {
+          const bucket = process.env.S3_UPLOADS_BUCKET;
+
+          if (String(v.filename).endsWith("/master.m3u8")) {
+            const prefix = String(v.filename).replace(/\/master\.m3u8$/i, "");
+            await deletePrefixFromS3({ bucket, prefix: `${prefix}/` });
+          } else {
+            // fallback (older mp4 uploads)
+            await deleteFromS3({ bucket, key: v.filename });
+          }
+        }
       }
     } else {
       // local cleanup (only if you use VIDEO_SOURCE=local)
@@ -1327,74 +1427,70 @@ app.post("/api/videos/upload", requireAuth, upload.single("video"), async (req, 
     let storedFilename = req.file.filename;
 
     // ---------- AWS pipeline (NO HLS for now) ----------
-    if (VIDEO_SOURCE === "aws") {
-      if (!process.env.S3_UPLOADS_BUCKET) {
-        throw new Error("Missing env S3_UPLOADS_BUCKET while VIDEO_SOURCE=aws");
-      }
+    // ---------- AWS pipeline (HLS) ----------
+  if (VIDEO_SOURCE === "aws") {
+    if (!process.env.S3_UPLOADS_BUCKET) {
+      throw new Error("Missing env S3_UPLOADS_BUCKET while VIDEO_SOURCE=aws");
+    }
 
-      // Store mp4 under a stable prefix per user
-      const mp4Key = `uploads/${userId}/${req.file.filename}`;
-      log("S3 MP4 upload start", {
-        bucket: process.env.S3_UPLOADS_BUCKET,
-        key: mp4Key,
+    const bucket = process.env.S3_UPLOADS_BUCKET;
+
+    // Build a stable folder per uploaded file
+    const base = path.parse(req.file.filename).name;
+    const hlsOutDir = path.join(DATA_ROOT, "hls", `${userId}`, base);
+
+    log("HLS transcode start", { input: req.file.path, outDir: hlsOutDir });
+    const tHls = Date.now();
+    await generateHls(req.file.path, hlsOutDir);
+    log("HLS transcode ok", { ms: Date.now() - tHls });
+
+    // Upload HLS folder to S3
+    const hlsKeyPrefix = `hls/${userId}/${base}`;
+    log("S3 HLS upload start", { bucket, keyPrefix: hlsKeyPrefix });
+
+    const tS3 = Date.now();
+    await uploadDirToS3({
+      bucket,
+      dirPath: hlsOutDir,
+      keyPrefix: hlsKeyPrefix,
+    });
+    log("S3 HLS upload ok", { ms: Date.now() - tS3 });
+
+    // Store master playlist key in DB (your existing playbackUrl logic will use this)
+    storedFilename = `${hlsKeyPrefix}/master.m3u8`;
+
+    // Upload thumb to S3 assets bucket (same as before)
+    if (
+      storedThumb !== "placeholder.jpg" &&
+      fs.existsSync(thumbPath) &&
+      process.env.S3_ASSETS_BUCKET
+    ) {
+      log("S3 thumb upload start", {
+        bucket: process.env.S3_ASSETS_BUCKET,
+        key: storedThumb,
       });
 
-      const tS3Mp4 = Date.now();
-      await uploadFileToS3({
-        bucket: process.env.S3_UPLOADS_BUCKET,
-        key: mp4Key,
-        filePath: req.file.path,
-        contentType: "video/mp4",
-      });
-      log("S3 MP4 upload ok", { ms: Date.now() - tS3Mp4 });
-
-      storedFilename = mp4Key;
-
-      // Upload thumb to S3 assets bucket (optional)
-      if (
-        storedThumb !== "placeholder.jpg" &&
-        fs.existsSync(thumbPath) &&
-        process.env.S3_ASSETS_BUCKET
-      ) {
-        log("S3 thumb upload start", {
+      const tS3Thumb = Date.now();
+      try {
+        await uploadFileToS3({
           bucket: process.env.S3_ASSETS_BUCKET,
           key: storedThumb,
+          filePath: thumbPath,
+          contentType: "image/jpeg",
         });
-
-        const tS3Thumb = Date.now();
-        try {
-          await uploadFileToS3({
-            bucket: process.env.S3_ASSETS_BUCKET,
-            key: storedThumb,
-            filePath: thumbPath,
-            contentType: "image/jpeg",
-          });
-          log("S3 thumb upload ok", { ms: Date.now() - tS3Thumb });
-        } catch (e) {
-          log("S3 thumb upload failed", { ms: Date.now() - tS3Thumb, error: e?.message });
-        }
-      } else {
-        log("S3 thumb upload skipped", {
-          storedThumb,
-          hasThumbFile: fs.existsSync(thumbPath),
-          hasAssetsBucket: !!process.env.S3_ASSETS_BUCKET,
-        });
-      }
-
-      // Cleanup local temp files
-      log("Cleanup start (local upload + local thumb)");
-      try {
-        if (fs.existsSync(req.file.path)) fs.unlinkSync(req.file.path);
+        log("S3 thumb upload ok", { ms: Date.now() - tS3Thumb });
       } catch (e) {
-        log("Cleanup: delete local upload failed", { error: e?.message });
+        log("S3 thumb upload failed", { ms: Date.now() - tS3Thumb, error: e?.message });
       }
-      try {
-        if (storedThumb !== "placeholder.jpg" && fs.existsSync(thumbPath)) fs.unlinkSync(thumbPath);
-      } catch (e) {
-        log("Cleanup: delete local thumb failed", { error: e?.message });
-      }
-      log("Cleanup done");
     }
+
+    // Cleanup local temp files
+    log("Cleanup start (local upload + local thumb + local hls)");
+    try { if (fs.existsSync(req.file.path)) fs.unlinkSync(req.file.path); } catch {}
+    try { if (storedThumb !== "placeholder.jpg" && fs.existsSync(thumbPath)) fs.unlinkSync(thumbPath); } catch {}
+    try { if (fs.existsSync(hlsOutDir)) fs.rmSync(hlsOutDir, { recursive: true, force: true }); } catch {}
+    log("Cleanup done");
+  }
 
     // ---------- DB insert ----------
     log("DB insert start", {
@@ -1440,7 +1536,9 @@ app.post("/api/videos/upload", requireAuth, upload.single("video"), async (req, 
     }
 
     log("DONE error", { totalMs: Date.now() - t0 });
-    return res.status(500).json({ error: "Failed to upload video" });
+    return res.status(500).json({
+      error: e?.message || "Failed to upload video",
+    });
   }
 });
 
@@ -1511,6 +1609,19 @@ app.get("/__whoami", (req, res) => {
 
 app.get("/", (_req, res) => {
   res.send("MYTUBE server ✅ Try /api/videos");
+});
+
+app.use((err, _req, res, _next) => {
+  // Multer errors & our fileFilter errors land here
+  if (err) {
+    const msg = err.message || "Upload failed";
+    // Treat upload validation problems as 400
+    const status = msg.toLowerCase().includes("video") || msg.toLowerCase().includes("file")
+      ? 400
+      : 500;
+    return res.status(status).json({ error: msg });
+  }
+  return res.status(500).json({ error: "Unknown error" });
 });
 
 
