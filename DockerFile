@@ -1,0 +1,18 @@
+FROM node:20-bullseye
+
+# Install ffmpeg
+RUN apt-get update && apt-get install -y ffmpeg && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+# Install deps first (better caching)
+COPY package*.json ./
+RUN npm ci
+
+# Copy your app
+COPY . .
+
+ENV NODE_ENV=production
+EXPOSE 3001
+
+CMD ["node", "server.js"]

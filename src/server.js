@@ -98,7 +98,8 @@ const corsOptions = {
   },
   credentials: true,
   methods: ["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
-  allowedHeaders: ["Content-Type", "Authorization"],
+  allowedHeaders: ["Content-Type", "Authorization", "X-Requested-With"],
+  exposedHeaders: ["Content-Length", "Content-Range"],
 };
 
 app.use(cors(corsOptions));
@@ -587,6 +588,15 @@ registerGeneratePublish(app, {
   uploadFileToS3,
   VIDEO_SOURCE,
   VIDEO_DIR,
+});
+
+app.get("/__ffmpeg", async (_req, res) => {
+  try {
+    const r = await runCmd("ffmpeg", ["-version"]);
+    res.json({ ok: true, ffmpeg: (r.out || r.err).slice(0, 500) });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e.message });
+  }
 });
 
 // -------------------------
