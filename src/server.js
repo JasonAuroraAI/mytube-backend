@@ -262,18 +262,17 @@ async function generateHls(inputPath, outDir) {
 
     // Letterbox/pillarbox (no stretch) + exact output frames
     "-filter_complex",
-    [
-      "[0:v]split=2[v1][v2];",
+      [
+        "[0:v]split=2[v1][v2];",
 
-      "[v1]scale=w=854:h=480:force_original_aspect_ratio=decrease," +
-        "pad=854:480:(ow-iw)/2:(oh-ih)/2," +
-        "setsar=1[v1out];",
+        "[v1]scale=854:480:force_original_aspect_ratio=decrease," +
+          "pad=854:480:(w-iw)/2:(h-ih)/2," +
+          "setsar=1,format=yuv420p[v1out];",
 
-      "[v2]scale=w=1280:h=720:force_original_aspect_ratio=decrease," +
-        "pad=1280:720:(ow-iw)/2:(oh-ih)/2," +
-        "setsar=1[v2out];",
-    ].join(" "),
-
+        "[v2]scale=1280:720:force_original_aspect_ratio=decrease," +
+          "pad=1280:720:(w-iw)/2:(h-ih)/2," +
+          "setsar=1,format=yuv420p[v2out];",
+      ].join(" "),
     // ✅ Map video+audio per variant (audio duplicated)
     "-map", "[v1out]",
     "-map", "0:a?",
