@@ -236,10 +236,11 @@ const upload = multer({
 // FFMPEG helpers
 // -------------------------
 function runCmd(cmd, args) {
+  // Print the exact command + arguments
+  console.log("RUN:", cmd, args.map((a) => (a === undefined ? "undefined" : JSON.stringify(a))).join(" "));
+
   return new Promise((resolve, reject) => {
     const p = spawn(cmd, args, { windowsHide: true });
-
-    console.log("RUN:", cmd, args.map(a => JSON.stringify(a)).join(" "));
 
     let out = "";
     let err = "";
@@ -258,29 +259,24 @@ function runCmd(cmd, args) {
 async function generateHls(inputPath, outDir) {
   fs.mkdirSync(outDir, { recursive: true });
 
-  const filter = [
-    "[0:v]split=2[v1][v2];",
-    "[v1]scale=854:480:force_original_aspect_ratio=decrease," +
-      "pad=854:480:(854-iw)/2:(480-ih)/2," +
-      "setsar=1,format=yuv420p[v1out];",
-    "[v2]scale=1280:720:force_original_aspect_ratio=decrease," +
-      "pad=1280:720:(1280-iw)/2:(720-ih)/2," +
-      "setsar=1,format=yuv420p[v2out];",
-  ].join("");
+  const vf0 =
+    "scale=854:480:force_original_aspect_ratio=decrease," +
+    "pad=854:480:(854-iw)/2:(480-ih)/2," +
+    "setsar=1,format=yuv420p";
+
+  const vf1 =
+    "scale=1280:720:force_original_aspect_ratio=decrease," +
+    "pad=1280:720:(1280-iw)/2:(720-ih)/2," +
+    "setsar=1,format=yuv420p";
 
   const args = [
     "-y",
     "-i", inputPath,
 
-    "-filter_complex", filter,
-
-    // ✅ Map video+audio per variant (audio duplicated)
-    "-map", "[v1out]",
+    // Variant 0
+    "-map", "0:v:0",
     "-map", "0:a?",
-    "-map", "[v2out]",
-    "-map", "0:a?",
-
-    // Video encodes
+    "-filter:v:0", vf0,
     "-c:v:0", "libx264",
     "-profile:v:0", "main",
     "-crf:v:0", "20",
@@ -289,6 +285,10 @@ async function generateHls(inputPath, outDir) {
     "-keyint_min", "48",
     "-sc_threshold", "0",
 
+    // Variant 1
+    "-map", "0:v:0",
+    "-map", "0:a?",
+    "-filter:v:1", vf1,
     "-c:v:1", "libx264",
     "-profile:v:1", "main",
     "-crf:v:1", "20",
@@ -297,27 +297,23 @@ async function generateHls(inputPath, outDir) {
     "-keyint_min", "48",
     "-sc_threshold", "0",
 
-    // ✅ Audio encodes (one for each variant)
+    // Audio duplicate
     "-c:a:0", "aac",
     "-b:a:0", "128k",
     "-ac:a:0", "2",
-
     "-c:a:1", "aac",
     "-b:a:1", "128k",
     "-ac:a:1", "2",
 
-    // HLS output
+    // HLS
     "-f", "hls",
     "-hls_time", "4",
     "-hls_playlist_type", "vod",
     "-hls_flags", "independent_segments",
     "-hls_segment_type", "mpegts",
-
     "-hls_segment_filename", path.join(outDir, "v%v", "seg_%05d.ts"),
     "-master_pl_name", "master.m3u8",
-
     "-var_stream_map", "v:0,a:0 v:1,a:1",
-
     path.join(outDir, "v%v", "playlist.m3u8"),
   ];
 
