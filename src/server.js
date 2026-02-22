@@ -17,6 +17,7 @@ import { spawn } from "child_process";
 import os from "os";
 
 import { registerGeneratePublish } from "./generatePublish.js";
+import { registerGenerateProjects } from "./generateProjects.js";
 
 
 // ✅ S3 helpers (single import, consistent exports)
@@ -576,6 +577,11 @@ async function toApiVideo(req, v) {
     playbackUrl,
   };
 }
+
+registerGenerateProjects(app, {
+  pool,
+  requireAuth,
+});
 
 registerGeneratePublish(app, {
   pool,
