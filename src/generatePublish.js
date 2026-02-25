@@ -330,23 +330,15 @@ export function registerGeneratePublish(app, deps = {}) {
       console.log(`🎉 Publish handler completed in ${Date.now() - requestStart}ms`);
       cleanup();
 
-      // NOTE: For now, we return debug:true.
-      // As you progressively rebuild, keep the same response shape or expand it.
-      return res.json({ ok: true, debug: true });
-
-      /* ============================================================
-         NEXT STEPS (Enable one at a time)
-         - Uncomment STEP 1, deploy, test.
-         - Then STEP 2, deploy, test.
-         - etc.
-      ============================================================ */
-
+    
       // // STEP 1: confirm buckets exist / env present
-      // const uploadsBucket = process.env.S3_UPLOADS_BUCKET;
-      // const assetsBucket = process.env.S3_ASSETS_BUCKET;
-      // if (!uploadsBucket) throw new Error("Missing env S3_UPLOADS_BUCKET");
-      // if (!assetsBucket) throw new Error("Missing env S3_ASSETS_BUCKET");
-      // console.log("🪣 Buckets OK:", { uploadsBucket, assetsBucket });
+       const uploadsBucket = process.env.S3_UPLOADS_BUCKET;
+       const assetsBucket = process.env.S3_ASSETS_BUCKET;
+       if (!uploadsBucket) throw new Error("Missing env S3_UPLOADS_BUCKET");
+       if (!assetsBucket) throw new Error("Missing env S3_ASSETS_BUCKET");
+       console.log("🪣 Buckets OK:", { uploadsBucket, assetsBucket });
+
+      return res.json({ ok: true, debug: true });
 
       // // STEP 2: fetch DB filenames for sources referenced in timeline
       // // (you’ll likely need to split video/audio clips again)
