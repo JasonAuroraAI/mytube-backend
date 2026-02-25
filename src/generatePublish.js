@@ -199,9 +199,9 @@ function buildFilterVideoAndAudio({
     aLabels.push(`[a${k}]`);
   }
 
-  parts.push(
-    `${aLabels.join("")}amix=inputs=${audioClips.length}:normalize=0:dropout_transition=0,` +
-      `atrim=0:${safeTotal},asetpts=PTS-STARTPTS[aout]`
+    parts.push(
+    `${aLabels.join("")}amix=inputs=${audioClips.length}:dropout_transition=0,` +
+    `atrim=0:${safeTotal},asetpts=PTS-STARTPTS[aout]`
   );
 
   return parts.join(";");
