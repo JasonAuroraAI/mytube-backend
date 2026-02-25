@@ -126,7 +126,9 @@ const corsOptions = {
 };
 
 app.use(cors(corsOptions));
-app.options("*", cors(corsOptions));
+
+// ✅ make preflight match EVERYTHING reliably
+app.options(/.*/, cors(corsOptions));
 
 
 
