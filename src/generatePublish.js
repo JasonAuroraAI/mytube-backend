@@ -328,8 +328,17 @@ function buildFilterVideoAndAudio({
     if (idx == null) throw new Error(`Missing input index for videoId ${c.videoId}`);
 
     const dur = Math.max(0, Number(c.out) - Number(c.in));
+    const TARGET_W = 1920;
+    const TARGET_H = 1080;
+
     parts.push(
-      `[${idx}:v]trim=start=${c.in}:duration=${dur},setpts=PTS-STARTPTS[v${j}]`
+      `[${idx}:v]` +
+        `trim=start=${c.in}:duration=${dur},` +
+        `setpts=PTS-STARTPTS,` +
+        `scale=${TARGET_W}:${TARGET_H}:force_original_aspect_ratio=decrease,` +
+        `pad=${TARGET_W}:${TARGET_H}:(ow-iw)/2:(oh-ih)/2,` +
+        `setsar=1` +
+        `[v${j}]`
     );
     vLabels.push(`[v${j}]`);
   }
