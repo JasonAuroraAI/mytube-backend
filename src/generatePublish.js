@@ -384,6 +384,73 @@ function stepShouldRun(currentStep, requestedStep) {
   return currentStep <= requestedStep;
 }
 
+function readTextSafe(p) {
+  try {
+    return fs.readFileSync(p, "utf8");
+  } catch {
+    return "";
+  }
+}
+
+/**
+ * If master.m3u8 is a "master playlist" (has STREAM-INF),
+ * pick the first variant playlist path and return its absolute path.
+ * Otherwise return master itself.
+ */
+function resolveHlsPlaylistForThumbnail(localMasterPath) {
+  const txt = readTextSafe(localMasterPath);
+
+  // Not a master playlist -> use it directly
+  if (!txt.includes("#EXT-X-STREAM-INF")) return localMasterPath;
+
+  const dir = path.dirname(localMasterPath);
+  const lines = txt.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+
+  // Master format is: #EXT-X-STREAM-INF ... then next non-comment line is a URI
+  for (let i = 0; i < lines.length; i++) {
+    if (lines[i].startsWith("#EXT-X-STREAM-INF")) {
+      // find next URI line
+      for (let j = i + 1; j < lines.length; j++) {
+        const l = lines[j];
+        if (!l.startsWith("#")) {
+          // URI may be relative
+          return path.resolve(dir, l);
+        }
+      }
+    }
+  }
+
+  // Fallback: just use master
+  return localMasterPath;
+}
+
+async function tryMakeThumbFromHls({ playlistPath, outJpgPath, seconds }) {
+  // IMPORTANT: -ss after -i for HLS/TS reliability
+  await runFfmpeg([
+    "-y",
+    "-hide_banner",
+    "-loglevel", "error",
+    "-i", playlistPath,
+    "-ss", String(seconds),
+    "-an",
+    "-sn",
+    "-frames:v", "1",
+    "-vf", "scale=1280:-2",
+    "-q:v", "2",
+    "-f", "image2",
+    outJpgPath,
+  ]);
+}
+
+function fileBigEnough(p, minBytes = 1500) {
+  try {
+    const st = fs.statSync(p);
+    return st.isFile() && st.size >= minBytes;
+  } catch {
+    return false;
+  }
+}
+
 /* ============================================================
    MAIN ROUTE
 ============================================================ */
@@ -629,6 +696,7 @@ export function registerGeneratePublish(app, deps = {}) {
       }
 
       /* STEP 6: thumbnail from the GENERATED HLS (NO filter_complex) */
+      /* STEP 6: thumbnail from GENERATED HLS */
       const t6 = Date.now();
 
       const safeTotal = Math.max(0.01, Number(totalDur) || 0);
@@ -637,26 +705,61 @@ export function registerGeneratePublish(app, deps = {}) {
       const thumbName = `thumb-${Date.now()}-${crypto.randomBytes(6).toString("hex")}.jpg`;
       const thumbPath = path.join(outDir, thumbName);
 
-      // IMPORTANT: this command does NOT use -filter_complex at all
-      // so -vf scale is perfectly valid and can never trigger the mix error.
-      await runFfmpeg([
-        "-y",
-        "-hide_banner",
-        "-loglevel", "error",
-        "-ss", String(mid),
-        "-i", localMaster,
-        "-frames:v", "1",
-        "-vf", "scale=1280:-2",
-        "-q:v", "2",
-        thumbPath,
-      ]);
+      // If master is a true "master playlist", pick a variant playlist for decoding
+      const thumbPlaylist = resolveHlsPlaylistForThumbnail(localMaster);
 
-      if (!fs.existsSync(thumbPath) || fs.statSync(thumbPath).size < 1000) {
-        throw new Error("Thumbnail extraction failed (thumb missing or too small)");
+      debug.artifacts.thumbPlaylist = thumbPlaylist;
+
+      // Try a few timestamps (HLS seeking can fail on some points)
+      const candidates = [
+        mid,
+        0,
+        0.5,
+        1,
+        2,
+        3,
+        Math.max(0, mid - 1),
+        Math.min(safeTotal - 0.1, mid + 1),
+      ].filter((x) => Number.isFinite(x) && x >= 0);
+
+      let thumbOk = false;
+      let lastErr = null;
+
+      for (const sec of candidates) {
+        try {
+          // clear any previous file
+          try { fs.rmSync(thumbPath, { force: true }); } catch {}
+          await tryMakeThumbFromHls({ playlistPath: thumbPlaylist, outJpgPath: thumbPath, seconds: sec });
+
+          if (fileBigEnough(thumbPath, 1500)) {
+            debug.artifacts.thumbAtSeconds = sec;
+            thumbOk = true;
+            break;
+          }
+        } catch (e) {
+          lastErr = e;
+        }
+      }
+
+      if (!thumbOk) {
+        const extra =
+          `Thumb playlist used: ${thumbPlaylist}\n` +
+          `Tried seconds: ${candidates.map((s) => s.toFixed(3)).join(", ")}\n` +
+          `Master exists: ${fs.existsSync(localMaster)}\n` +
+          `Playlist exists: ${fs.existsSync(thumbPlaylist)}\n` +
+          `Playlist size: ${fs.existsSync(thumbPlaylist) ? fs.statSync(thumbPlaylist).size : 0}\n`;
+
+        throw new Error(
+          "Thumbnail extraction failed (thumb missing or too small).\n" +
+            extra +
+            (lastErr?.message ? `\nLast ffmpeg error:\n${lastErr.message}` : "")
+        );
       }
 
       debug.artifacts.thumbPath = thumbPath;
       debug.artifacts.thumbSize = fs.statSync(thumbPath).size;
+
+      console.log("✅ STEP 6 ok (thumb extracted)", { size: debug.artifacts.thumbSize });
       debug.ms.step6 = Date.now() - t6;
 
       if (!stepShouldRun(6, requestedStep)) {
