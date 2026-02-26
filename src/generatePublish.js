@@ -345,6 +345,7 @@ function buildFilterVideoAndAudio({
     vLabels.push(`[v${j}]`);
   }
   parts.push(`${vLabels.join("")}concat=n=${videoClips.length}:v=1:a=0[vout]`);
+  parts.push(`[vout]scale=1280:-2[vthumb]`);
 
   // AUDIO: layered mix positioned by start
   const safeTotal = Math.max(0.01, Number(totalDur) || 0);
@@ -734,7 +735,7 @@ export function registerGeneratePublish(app, deps = {}) {
         "-map", "[vout]",
         "-ss", String(mid),
         "-frames:v", "1",
-        "-vf", "scale=1280:-2",
+        "-map", "[vthumb]",
         "-q:v", "2",
         thumbPath,
       ]);
