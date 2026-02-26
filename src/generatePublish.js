@@ -34,28 +34,32 @@ function runCmd(cmd, args, { cwd } = {}) {
     const start = Date.now();
     const p = spawn(cmd, args, { windowsHide: true, cwd });
 
-    let out = "";
-    let err = "";
+    // Keep only the last ~8KB of stderr in memory for error reporting
+    let errTail = "";
+    const TAIL_MAX = 8 * 1024;
 
-    p.stdout.on("data", (d) => (out += d.toString()));
-    p.stderr.on("data", (d) => (err += d.toString()));
+    p.stdout.on("data", (d) => {
+      // optional: comment this out if too chatty
+      // process.stdout.write(d);
+    });
+
+    p.stderr.on("data", (d) => {
+      const s = d.toString();
+      process.stderr.write(s);
+      errTail = (errTail + s).slice(-TAIL_MAX);
+    });
 
     p.on("error", (e) => {
-      console.error(`❌ Spawn error for ${cmd}:`, e?.stack || e);
+      console.error(`❌ Spawn error for ${cmd}:`, e);
       reject(e);
     });
 
     p.on("close", (code, signal) => {
       const ms = Date.now() - start;
       console.log(`⏱ ${cmd} exited code=${code} signal=${signal} in ${ms}ms`);
+      if (code === 0) return resolve({ ms });
 
-      if (code === 0) return resolve({ out, err, ms });
-
-      console.error(`❌ ${cmd} FAILED`);
-      const tail = String(err || "");
-      console.error("stderr (last 4000 chars):");
-      console.error(tail.slice(Math.max(0, tail.length - 4000)));
-      reject(new Error(tail || `${cmd} exited with code ${code}`));
+      reject(new Error(errTail || `${cmd} exited with code ${code}`));
     });
   });
 }
@@ -628,6 +632,10 @@ export function registerGeneratePublish(app, deps = {}) {
         "-hide_banner",
         "-loglevel",
         "error",
+        "-threads",
+        "1",
+        "-filter_threads",
+        "1",
         "-filter_complex",
         filter,
         "-map",
@@ -642,6 +650,8 @@ export function registerGeneratePublish(app, deps = {}) {
         "22",
         "-pix_fmt",
         "yuv420p",
+        "-max_muxing_queue_size",
+        "1024",
         "-c:a",
         "aac",
         "-b:a",
@@ -686,6 +696,7 @@ export function registerGeneratePublish(app, deps = {}) {
         "-loglevel",
         "error",
         "-i",
+        "-threads", "1",
         mp4Path,
         "-c:v",
         "libx264",
