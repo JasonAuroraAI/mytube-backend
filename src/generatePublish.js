@@ -166,17 +166,10 @@ async function extractThumbnailFromFiltergraph({
     "-loglevel",
     "error",
     "-filter_complex",
-    "-max_muxing_queue_size 256",
-    "-muxdelay 0",
-    "-muxpreload 0",
     filter,
     "-map",
     "[vout]",
     "-ss",
-    "-theads 1",
-    "-filter_threads 1",
-    "-probesize 32k",
-    "-analyzeduration 0",
     String(t),
     "-frames:v",
     "1",
@@ -635,60 +628,32 @@ export function registerGeneratePublish(app, deps = {}) {
       const localSegPattern = path.join(hlsLocalDir, "seg-%05d.ts");
 
       // Build args: inputs + filtergraph + map + HLS output
-            // Build args: inputs + filtergraph + map + HLS output (LOW-MEM)
       const hlsArgs = [];
-      for (const p of inputPaths) {
-        // keep per-input demux queues small (can help a bit)
-        hlsArgs.push("-thread_queue_size", "64", "-i", p);
-      }
+      for (const p of inputPaths) hlsArgs.push("-i", p);
 
       hlsArgs.push(
         "-y",
-        "-nostdin",
         "-hide_banner",
         "-loglevel",
         "error",
-
-        // lower probe buffering
-        "-probesize",
-        "32k",
-        "-analyzeduration",
-        "0",
-
-        // fewer threads => fewer frame buffers
-        "-threads",
-        "1",
-        "-filter_threads",
-        "1",
-
         "-filter_complex",
         filter,
         "-map",
         "[vout]",
         "-map",
         "[aout]",
-
         "-c:v",
         "libx264",
         "-preset",
-        "ultrafast",
+        "veryfast",
         "-crf",
-        "28",
+        "22",
         "-pix_fmt",
         "yuv420p",
-
         "-c:a",
         "aac",
         "-b:a",
-        "128k",
-
-        // keep mux queues small
-        "-max_muxing_queue_size",
-        "256",
-        "-muxdelay",
-        "0",
-        "-muxpreload",
-        "0",
+        "192k",
 
         // HLS options
         "-f",
@@ -741,13 +706,6 @@ export function registerGeneratePublish(app, deps = {}) {
         "-loglevel",
         "error",
         "-ss",
-        "-theads 1",
-        "-filter_threads 1",
-        "-probesize 32k",
-        "-analyzeduration 0",
-        "-max_muxing_queue_size 256",
-        "-muxdelay 0",
-        "-muxpreload 0",
         String(mid),
         "-i",
         localMaster,
