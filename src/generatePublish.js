@@ -344,8 +344,9 @@ function buildFilterVideoAndAudio({
     );
     vLabels.push(`[v${j}]`);
   }
-  parts.push(`${vLabels.join("")}concat=n=${videoClips.length}:v=1:a=0[vout]`);
-  parts.push(`[vout]scale=1280:-2[vthumb]`);
+  parts.push(`${vLabels.join("")}concat=n=${videoClips.length}:v=1:a=0[vmain]`);
+  parts.push(`[vmain]split=2[vout][vthumbsrc]`);
+  parts.push(`[vthumbsrc]scale=1280:-2[vthumb]`);
 
   // AUDIO: layered mix positioned by start
   const safeTotal = Math.max(0.01, Number(totalDur) || 0);
@@ -731,10 +732,10 @@ export function registerGeneratePublish(app, deps = {}) {
         "-y",
         "-hide_banner",
         "-loglevel", "error",
-        "-ss", String(mid),
         "-filter_complex", filter,
         "-frames:v", "1",
         "-map", "[vthumb]",
+         "-ss", String(mid),
         "-q:v", "2",
         thumbPath,
       ]);
