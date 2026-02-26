@@ -702,28 +702,40 @@ export function registerGeneratePublish(app, deps = {}) {
       const t6 = Date.now();
 
       // STEP 7: extract thumbnail from the generated HLS (separate ffmpeg run)
+      // pick a safe time inside the timeline
       const safeTotal = Math.max(0.01, Number(totalDur) || 0);
       const mid = clamp(safeTotal / 2, 0, Math.max(0, safeTotal - 0.1));
 
       const thumbName = `thumb-${Date.now()}-${crypto.randomBytes(6).toString("hex")}.jpg`;
       const thumbPath = path.join(outDir, thumbName);
 
-      // IMPORTANT: this uses -vf, but that's fine because THIS run has no -filter_complex
+      // IMPORTANT: make sure .m3u8 inputs get the whitelist flags for this run too
+      const thumbInputs = [];
+      for (const p of inputPaths) {
+        if (String(p).endsWith(".m3u8")) {
+          thumbInputs.push(
+            "-protocol_whitelist", "file,crypto,data",
+            "-allowed_extensions", "ALL",
+            "-fflags", "+genpts",
+            "-i", p
+          );
+        } else {
+          thumbInputs.push("-i", p);
+        }
+      }
+
+      // run a one-frame render from [vout]
       await runCmd("ffmpeg", [
+        ...thumbInputs,
         "-y",
         "-hide_banner",
-        "-loglevel",
-        "error",
-        "-ss",
-        String(mid),
-        "-i",
-        localMaster,
-        "-frames:v",
-        "1",
-        "-vf",
-        "scale=1280:-2",
-        "-q:v",
-        "2",
+        "-loglevel", "error",
+        "-filter_complex", filter,
+        "-map", "[vout]",
+        "-ss", String(mid),
+        "-frames:v", "1",
+        "-vf", "scale=1280:-2",
+        "-q:v", "2",
         thumbPath,
       ]);
 
