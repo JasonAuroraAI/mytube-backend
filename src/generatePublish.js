@@ -328,8 +328,8 @@ function buildFilterVideoAndAudio({
     if (idx == null) throw new Error(`Missing input index for videoId ${c.videoId}`);
 
     const dur = Math.max(0, Number(c.out) - Number(c.in));
-    const TARGET_W = 1920;
-    const TARGET_H = 1080;
+    const TARGET_W = 1280;
+    const TARGET_H = 720;
 
     parts.push(
       `[${idx}:v]` +
